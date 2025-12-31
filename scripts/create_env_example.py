@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""创建 .env.example 文件"""
+import os
+from pathlib import Path
+
+content = """# ============================================
+# Codebase Driven Agent Environment Variables
+# ============================================
+# Copy this file to .env and fill in actual values
+# cp .env.example .env
+
+# ========== Required Configuration ==========
+# At least configure one LLM API Key
+
+# OpenAI Configuration
+OPENAI_API_KEY=sk-your-openai-api-key-here
+# Or use custom Base URL (supports other OpenAI-compatible APIs)
+OPENAI_BASE_URL=https://api.openai.com/v1
+
+# Anthropic Configuration
+# ANTHROPIC_API_KEY=sk-ant-your-anthropic-api-key-here
+
+# Other Provider Configuration (using OpenAI-compatible interface)
+# LLM_PROVIDER=openai
+# LLM_BASE_URL=https://your-custom-api-endpoint.com/v1
+# LLM_API_KEY=your-api-key-here
+
+# LLM Model Configuration (Optional)
+LLM_MODEL=gpt-4
+LLM_TEMPERATURE=0.0
+LLM_MAX_TOKENS=4000
+
+# ========== API Authentication (Optional) ==========
+# If set, API requests need to provide X-API-Key header
+API_KEY=your-secret-api-key
+
+# ========== Code Repository Configuration (Optional) ==========
+# If you want Agent to analyze local codebase, set code repository path
+CODE_REPO_PATH=./codebase
+
+# ========== Log Query Configuration (Optional) ==========
+# Choose one log query method
+
+# Option 1: Logyi
+LOG_QUERY_TYPE=logyi
+LOGYI_BASE_URL=https://your-logyi-instance.com
+LOGYI_USERNAME=your-username
+LOGYI_APIKEY=your-api-key
+# LOGYI_APPNAME can be omitted, Agent will ask user when needed
+# LOGYI_APPNAME=your-project-name
+
+# Option 2: File Logs
+# LOG_QUERY_TYPE=file
+# LOG_FILE_BASE_PATH=./logs
+
+# ========== Database Configuration (Optional) ==========
+# If using database query feature, configure database connection
+# MySQL Example
+# DATABASE_URL=mysql+pymysql://user:password@localhost:3306/dbname
+# PostgreSQL Example
+# DATABASE_URL=postgresql://user:password@localhost:5432/dbname
+# SQLite Example
+# DATABASE_URL=sqlite:///./database.db
+
+# ========== Agent Configuration (Optional) ==========
+AGENT_MAX_ITERATIONS=15
+AGENT_MAX_EXECUTION_TIME=300
+
+# ========== Task Management Configuration (Optional) ==========
+TASK_STORAGE_TYPE=memory
+REDIS_URL=redis://localhost:6379/0
+TASK_TTL=3600
+MAX_TASKS=1000
+
+# ========== Cache Configuration (Optional) ==========
+CACHE_ENABLED=true
+CACHE_TTL=3600
+CACHE_MAX_SIZE=1000
+"""
+
+if __name__ == "__main__":
+    project_root = Path(__file__).parent.parent
+    env_example_path = project_root / ".env.example"
+    
+    with open(env_example_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    
+    print(f"Created .env.example at {env_example_path}")
+

@@ -1,0 +1,50 @@
+# 开发环境 Docker Compose 配置
+version: '3.8'
+
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: codebase-driven-agent-dev
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - ENVIRONMENT=development
+    volumes:
+      # 挂载源代码，支持热重载
+      - .:/app
+      - /app/__pycache__
+      - /app/.pytest_cache
+      # 代码仓库挂载
+      - ${CODE_REPO_PATH:-./codebase}:/app/codebase:ro
+      # 日志文件挂载
+      - ${LOG_FILE_BASE_PATH:-./logs}:/app/logs:ro
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - agent-network
+    command: uvicorn codebase_driven_agent.main:app --host 0.0.0.0 --port 8000 --reload
+
+  redis:
+    image: redis:7-alpine
+    container_name: codebase-driven-agent-redis-dev
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data-dev:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    networks:
+      - agent-network
+
+volumes:
+  redis-data-dev:
+    driver: local
+
+networks:
+  agent-network:
+    driver: bridge
+

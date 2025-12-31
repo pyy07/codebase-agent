@@ -1,0 +1,98 @@
+version: '3.8'
+
+services:
+  # Codebase Driven Agent 主服务
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: codebase-driven-agent
+    ports:
+      - "8000:8000"
+    environment:
+      # LLM 配置
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.0}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-4000}
+      
+      # 日志易配置
+      - LOGYI_BASE_URL=${LOGYI_BASE_URL:-}
+      - LOGYI_USERNAME=${LOGYI_USERNAME:-}
+      - LOGYI_APIKEY=${LOGYI_APIKEY:-}
+      - LOGYI_APPNAME=${LOGYI_APPNAME:-}
+      # LOGYI_APPNAME 可以不配置，Agent 会在需要时询问用户
+      
+      # 文件日志配置
+      - LOG_FILE_BASE_PATH=${LOG_FILE_BASE_PATH:-/app/logs}
+      - LOG_QUERY_TYPE=${LOG_QUERY_TYPE:-logyi}
+      
+      # 数据库配置
+      - DATABASE_URL=${DATABASE_URL:-}
+      
+      # Agent 配置
+      - AGENT_MAX_ITERATIONS=${AGENT_MAX_ITERATIONS:-15}
+      - AGENT_MAX_EXECUTION_TIME=${AGENT_MAX_EXECUTION_TIME:-300}
+      
+      # 任务管理配置
+      - TASK_STORAGE_TYPE=${TASK_STORAGE_TYPE:-memory}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - TASK_TTL=${TASK_TTL:-3600}
+      - MAX_TASKS=${MAX_TASKS:-1000}
+      
+      # 代码仓库配置
+      - CODE_REPO_PATH=${CODE_REPO_PATH:-/app/codebase}
+      
+      # API 配置
+      - API_KEY=${API_KEY:-}
+      
+      # 服务配置
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # 代码仓库挂载（可选，如果需要访问本地代码库）
+      - ${CODE_REPO_PATH:-./codebase}:/app/codebase:ro
+      # 日志文件挂载（如果使用文件日志）
+      - ${LOG_FILE_BASE_PATH:-./logs}:/app/logs:ro
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - agent-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Redis 服务（用于任务状态管理）
+  redis:
+    image: redis:7-alpine
+    container_name: codebase-driven-agent-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    networks:
+      - agent-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  agent-network:
+    driver: bridge
+

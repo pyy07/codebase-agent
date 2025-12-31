@@ -1,0 +1,205 @@
+# Codebase Driven Agent
+
+基于代码仓库驱动的通用 AI Agent 平台，通过查阅代码、日志、数据库等多种数据源，为开发者提供智能化的代码分析和问题解决能力。
+
+## 项目愿景
+
+**Codebase Driven Agent** 是一个基于代码库驱动的通用 AI Agent 平台。我们的目标是构建一个能够深度理解代码库、自主调用多种工具、解决各类开发问题的智能助手。
+
+**问题分析和错误排查** 只是我们当前的切入点，未来将扩展到更多场景：
+- 🔍 代码理解和文档生成
+- 🧪 测试用例生成和优化
+- 🔧 代码重构建议
+- 📊 代码质量分析
+- 🚀 性能优化建议
+- 📝 API 文档生成
+- 以及其他基于代码库的智能化功能
+
+## 当前功能（第一阶段）
+
+当前版本专注于**问题分析和错误排查**功能：
+
+- 🤖 **智能分析**: 基于 LangChain Agent 框架，自主调用工具分析问题
+- 📚 **多数据源**: 支持代码仓库、日志系统（日志易）、数据库查询
+- 🔍 **代码检索**: 基于错误信息智能检索相关代码
+- 📋 **日志分析**: 支持日志易 SPL 查询和本地文件日志查询
+- 🗄️ **数据库查询**: 支持 MySQL、PostgreSQL 等数据库
+- 🌐 **REST API**: 提供同步、异步、流式（SSE）三种接口
+- 💻 **Web UI**: 提供友好的用户界面（React + TypeScript）
+
+## 核心能力
+
+- 🏗️ **代码库驱动**: 深度理解代码库结构和逻辑，基于代码上下文进行智能分析
+- 🔌 **工具化架构**: 可扩展的工具系统，支持代码、日志、数据库等多种数据源
+- 🧠 **自主决策**: Agent 能够自主选择工具、分析结果、生成解决方案
+- 🔄 **持续扩展**: 架构设计支持未来添加新的工具和功能场景
+
+## 快速开始
+
+### 安装依赖
+
+```bash
+pip install -e ".[dev]"
+```
+
+### 配置环境变量
+
+创建 `.env` 文件：
+
+```bash
+# LLM 配置（至少配置一个）
+OPENAI_API_KEY=your-openai-api-key
+# 或使用自定义 Base URL（支持其他 OpenAI 兼容的 API）
+OPENAI_BASE_URL=https://your-custom-api-endpoint.com/v1
+OPENAI_API_KEY=your-api-key
+
+# 或使用通用配置（其他供应商）
+# LLM_BASE_URL=https://your-custom-api-endpoint.com/v1
+# LLM_API_KEY=your-api-key
+
+# 或
+ANTHROPIC_API_KEY=your-anthropic-api-key
+
+# 日志易配置（可选）
+LOGYI_BASE_URL=https://your-logyi-instance.com
+LOGYI_USERNAME=your-username
+LOGYI_APIKEY=your-api-key
+# LOGYI_APPNAME 可以不配置，Agent 会在需要时询问用户
+# LOGYI_APPNAME=your-project-name
+
+# 代码仓库配置（可选）
+# Windows 示例（推荐使用正斜杠）:
+CODE_REPO_PATH=F:/gf/code/algorithm
+# Linux/Mac 示例:
+# CODE_REPO_PATH=/home/user/codebase
+
+# 数据库配置（可选）
+DATABASE_URL=mysql+pymysql://user:password@localhost:3306/dbname
+
+# API 配置
+API_KEY=your-api-key-for-authentication
+```
+
+### 运行服务
+
+#### 方式 1: Docker 部署（推荐）
+
+```bash
+# 1. 配置环境变量
+cp .env.example .env
+# 编辑 .env 文件，填写必要的配置
+
+# 2. 一键启动
+chmod +x scripts/start.sh
+./scripts/start.sh
+
+# 或手动启动
+docker-compose up -d
+```
+
+访问 http://localhost:8000/docs 查看 API 文档。
+
+详细部署说明请查看 [DEPLOYMENT.md](DEPLOYMENT.md)
+
+#### 方式 2: 本地运行
+
+```bash
+uvicorn codebase_driven_agent.main:app --reload
+```
+
+后端服务运行在 http://localhost:8000
+
+访问 http://localhost:8000/docs 查看 Swagger API 文档。
+
+### 启动 Web UI
+
+1. **进入 Web 目录**
+
+```bash
+cd web
+```
+
+2. **安装前端依赖**
+
+```bash
+npm install
+```
+
+3. **启动前端开发服务器**
+
+```bash
+npm run dev
+```
+
+前端服务运行在 **http://localhost:3000**
+
+4. **访问 Web UI**
+
+打开浏览器访问：**http://localhost:3000**
+
+详细说明请查看 [Web UI 启动指南](docs/WEB_UI.md)
+
+## 项目结构
+
+```
+codebase_driven_agent/
+├── __init__.py
+├── main.py              # FastAPI 应用入口
+├── config.py            # 配置管理
+├── agent/               # Agent 核心逻辑
+│   ├── __init__.py
+│   ├── executor.py      # AgentExecutor
+│   └── prompt.py        # Prompt 模板
+├── tools/               # LangChain Tools
+│   ├── __init__.py
+│   ├── code_tool.py
+│   ├── log_tool.py
+│   └── database_tool.py
+├── api/                 # API 路由
+│   ├── __init__.py
+│   ├── routes.py
+│   └── models.py
+└── utils/               # 工具函数
+    ├── __init__.py
+    └── log_query.py
+```
+
+## 文档
+
+- [API 文档](docs/API.md) - 完整的 API 接口文档和使用示例
+- [使用指南](docs/USAGE.md) - 快速开始和使用场景
+- [配置说明](docs/CONFIG.md) - 详细的配置选项说明
+- [示例场景](docs/EXAMPLES.md) - 常见问题分析场景示例
+- [Web UI 启动指南](docs/WEB_UI.md) - Web UI 启动和使用说明
+- [开发者扩展文档](docs/DEVELOPMENT.md) - 如何扩展功能和添加新工具
+- [SETUP.md](SETUP.md) - 项目设置指南
+- [TESTING.md](TESTING.md) - 测试指南
+- [DEPLOYMENT.md](DEPLOYMENT.md) - 部署指南
+
+启动服务后，访问 `http://localhost:8000/docs` 查看 Swagger API 文档。
+
+## 开发
+
+### 代码格式化
+
+```bash
+black codebase_driven_agent tests
+ruff check codebase_driven_agent tests
+```
+
+### 类型检查
+
+```bash
+mypy codebase_driven_agent
+```
+
+### 运行测试
+
+```bash
+pytest
+```
+
+## 许可证
+
+MIT License
+
