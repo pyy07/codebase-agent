@@ -315,9 +315,14 @@ async def _execute_analysis_stream(
         except Exception as e:
             logger.warning(f"Failed to generate analysis plan: {e}, continuing without plan")
         
-        # 创建 SSE Callback Handler（传入计划步骤）
+        # 创建 SSE Callback Handler（传入计划步骤和事件循环）
         from codebase_driven_agent.agent.callbacks import SSECallbackHandler
-        callback_handler = SSECallbackHandler(message_queue, plan_steps=plan_steps)
+        # 获取当前事件循环并传递给 callback handler
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        callback_handler = SSECallbackHandler(message_queue, plan_steps=plan_steps, event_loop=current_loop)
         
         # 清空日志查询缓存（确保缓存仅在当次请求生效）
         from codebase_driven_agent.utils.log_query import get_log_query_instance
@@ -381,9 +386,13 @@ async def _execute_analysis_stream(
         # 发送 Agent 启动消息
         try:
             yield SSEMessage.progress("Agent 已启动，正在分析问题...", progress=0.1, step="agent_started")
-        except (GeneratorExit, asyncio.CancelledError):
-            logger.info("Client disconnected after agent started, cancelling agent task")
-            # 不 return，让 Agent 继续运行
+        except GeneratorExit:
+            logger.info("Client disconnected after agent started, agent task continues in background")
+            # 客户端断开，让 Agent 继续运行
+            raise
+        except asyncio.CancelledError:
+            logger.info("Task cancelled after agent started")
+            # 任务被取消，退出
             raise
         
         # 处理消息队列和 Agent 执行
@@ -419,26 +428,39 @@ async def _execute_analysis_stream(
                                 )
                                 last_progress_time = current_time
                                 logger.debug(f"Progress message sent successfully")
-                            except (GeneratorExit, asyncio.CancelledError):
-                                logger.info("Client disconnected during progress message")
+                            except GeneratorExit:
+                                logger.info("Client disconnected during progress message, agent task continues")
+                                # 客户端断开，退出循环，但不取消 Agent 任务
+                                raise  # 重新抛出，让外层处理
+                            except asyncio.CancelledError:
+                                logger.info("Task cancelled during progress message")
                                 break
                         elif event == "plan":
                             try:
                                 yield SSEMessage.plan(data.get("steps", []))
                                 logger.debug(f"Plan message sent with {len(data.get('steps', []))} steps")
-                            except (GeneratorExit, asyncio.CancelledError):
-                                logger.info("Client disconnected during plan message")
+                            except GeneratorExit:
+                                logger.info("Client disconnected during plan message, agent task continues")
+                                raise  # 重新抛出，让外层处理
+                            except asyncio.CancelledError:
+                                logger.info("Task cancelled during plan message")
                                 break
                         elif event == "error":
                             try:
                                 yield SSEMessage.error(data.get("error", "Unknown error"))
-                            except (GeneratorExit, asyncio.CancelledError):
-                                logger.info("Client disconnected during error message")
+                            except GeneratorExit:
+                                logger.info("Client disconnected during error message, agent task continues")
+                                raise  # 重新抛出，让外层处理
+                            except asyncio.CancelledError:
+                                logger.info("Task cancelled during error message")
                                 break
                         continue  # 处理完消息后继续循环
                 except asyncio.QueueEmpty:
                     # 队列为空，继续检查其他条件
                     pass
+                except GeneratorExit:
+                    # 客户端断开，重新抛出让外层处理
+                    raise
                 except Exception as e:
                     logger.error(f"Error processing queued message: {e}", exc_info=True)
                 
@@ -448,9 +470,13 @@ async def _execute_analysis_stream(
                         yield SSEMessage.progress("分析进行中，请稍候...", progress=0.5, step="processing")
                         last_progress_time = current_time
                         logger.debug("Heartbeat sent")
-                    except (GeneratorExit, asyncio.CancelledError):
+                    except GeneratorExit:
                         logger.info("Client disconnected during heartbeat")
-                        # 不 break，让 Agent 继续运行，只是不再发送消息
+                        # 客户端断开，让 Agent 继续运行，只是不再发送消息
+                        break
+                    except asyncio.CancelledError:
+                        logger.info("Task cancelled during heartbeat")
+                        # 任务被取消，退出循环
                         break
                 
                 # 创建任务列表
@@ -481,28 +507,30 @@ async def _execute_analysis_stream(
                                         )
                                         last_progress_time = loop.time()
                                         logger.debug(f"Progress message sent: {data.get('message', '')[:50]}...")
-                                    except (GeneratorExit, asyncio.CancelledError):
+                                    except GeneratorExit:
                                         logger.info("Client disconnected during progress message")
                                         break
-                                elif event == "plan":
-                                    try:
-                                        yield SSEMessage.plan(data.get("steps", []))
-                                        logger.debug(f"Plan message sent with {len(data.get('steps', []))} steps")
-                                    except (GeneratorExit, asyncio.CancelledError):
-                                        logger.info("Client disconnected during plan message")
+                                    except asyncio.CancelledError:
+                                        logger.info("Task cancelled during progress message")
                                         break
                                 elif event == "plan":
                                     try:
                                         yield SSEMessage.plan(data.get("steps", []))
                                         logger.debug(f"Plan message sent with {len(data.get('steps', []))} steps")
-                                    except (GeneratorExit, asyncio.CancelledError):
+                                    except GeneratorExit:
                                         logger.info("Client disconnected during plan message")
+                                        raise  # 重新抛出，让外层处理
+                                    except asyncio.CancelledError:
+                                        logger.info("Task cancelled during plan message")
                                         break
                                 elif event == "error":
                                     try:
                                         yield SSEMessage.error(data.get("error", "Unknown error"))
-                                    except (GeneratorExit, asyncio.CancelledError):
+                                    except GeneratorExit:
                                         logger.info("Client disconnected during error message")
+                                        raise  # 重新抛出，让外层处理
+                                    except asyncio.CancelledError:
+                                        logger.info("Task cancelled during error message")
                                         break
                         except asyncio.QueueEmpty:
                             pass
@@ -510,23 +538,98 @@ async def _execute_analysis_stream(
                             logger.error(f"Error processing queued message: {e}", exc_info=True)
                     
                     # 然后等待 Agent 完成或超时
+                    # 使用 shield 保护 agent_task，避免被 GeneratorExit 取消
                     try:
                         # 等待 Agent 完成或超时
                         logger.debug("Waiting for agent task completion (timeout=0.5s)...")
-                        agent_result = await asyncio.wait_for(agent_task, timeout=0.5)
+                        # 使用 shield 保护 agent_task
+                        shielded_task = asyncio.shield(agent_task)
+                        agent_result = await asyncio.wait_for(shielded_task, timeout=0.5)
                         agent_completed = True
                         logger.info("Agent task completed!")
                         break
+                    except GeneratorExit:
+                        # 客户端断开，重新抛出让外层处理
+                        logger.info("GeneratorExit during wait_for agent_task, client disconnected")
+                        raise
                     except asyncio.TimeoutError:
                         # 超时，继续循环检查队列
                         continue
+                    except asyncio.CancelledError:
+                        # shield 被取消，但 agent_task 可能还在运行
+                        logger.info("Shielded task cancelled, but agent_task may still be running")
+                        # 检查 agent_task 是否还在运行
+                        if not agent_task.done():
+                            logger.info("Agent task still running, continuing loop")
+                            continue
+                        else:
+                            # agent_task 已完成或被取消
+                            try:
+                                agent_result = agent_task.result()
+                                agent_completed = True
+                                logger.info("Agent task completed after shield cancellation!")
+                                break
+                            except asyncio.CancelledError:
+                                logger.warning("Agent task was cancelled")
+                                # 不 break，继续循环，让 Agent 任务继续运行
+                                continue
                 
                 # 等待任一任务完成
-                done, pending = await asyncio.wait(
-                    tasks,
-                    timeout=0.5,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
+                # 使用 asyncio.shield 保护 agent_task，避免被 GeneratorExit 取消
+                try:
+                    # 如果 tasks 中包含 agent_task，使用 shield 保护它
+                    if agent_task in tasks:
+                        # 创建一个受保护的任务列表
+                        protected_tasks = []
+                        agent_shield = None
+                        for task in tasks:
+                            if task == agent_task:
+                                # 使用 shield 保护 agent_task，避免被取消
+                                agent_shield = asyncio.shield(agent_task)
+                                protected_tasks.append(agent_shield)
+                            else:
+                                protected_tasks.append(task)
+                        done, pending = await asyncio.wait(
+                            protected_tasks,
+                            timeout=0.5,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        # 将受保护的任务转换回原始任务
+                        done_original = set()
+                        pending_original = set()
+                        for task in done:
+                            if agent_shield and task == agent_shield:
+                                done_original.add(agent_task)
+                            else:
+                                done_original.add(task)
+                        for task in pending:
+                            if agent_shield and task == agent_shield:
+                                pending_original.add(agent_task)
+                            else:
+                                pending_original.add(task)
+                        done = done_original
+                        pending = pending_original
+                    else:
+                        done, pending = await asyncio.wait(
+                            tasks,
+                            timeout=0.5,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                except GeneratorExit:
+                    # 客户端断开，重新抛出让外层处理
+                    logger.info("GeneratorExit during asyncio.wait, client disconnected")
+                    raise
+                except asyncio.CancelledError:
+                    # shield 被取消，但 agent_task 可能还在运行
+                    logger.info("asyncio.wait cancelled, but agent_task may still be running")
+                    # 检查 agent_task 是否还在运行
+                    if not agent_task.done():
+                        logger.info("Agent task still running after wait cancellation, continuing loop")
+                        # 继续循环，让 Agent 任务继续运行
+                        continue
+                    else:
+                        # agent_task 已完成或被取消，重新抛出 CancelledError
+                        raise
                 
                 # 保存 pending 任务以便后续取消
                 pending_tasks.extend(pending)
@@ -560,27 +663,42 @@ async def _execute_analysis_stream(
                                             step=data.get("step"),
                                         )
                                         last_progress_time = asyncio.get_event_loop().time()
-                                    except (GeneratorExit, asyncio.CancelledError):
+                                    except GeneratorExit:
                                         logger.info("Client disconnected during progress message")
+                                        raise  # 重新抛出，让外层处理
+                                    except asyncio.CancelledError:
+                                        logger.info("Task cancelled during progress message")
                                         break
                                 elif event == "plan":
                                     try:
                                         yield SSEMessage.plan(data.get("steps", []))
-                                    except (GeneratorExit, asyncio.CancelledError):
+                                    except GeneratorExit:
                                         logger.info("Client disconnected during plan message")
+                                        raise  # 重新抛出，让外层处理
+                                    except asyncio.CancelledError:
+                                        logger.info("Task cancelled during plan message")
                                         break
                                 elif event == "plan":
                                     try:
                                         yield SSEMessage.plan(data.get("steps", []))
-                                    except (GeneratorExit, asyncio.CancelledError):
+                                    except GeneratorExit:
                                         logger.info("Client disconnected during plan message")
+                                        raise  # 重新抛出，让外层处理
+                                    except asyncio.CancelledError:
+                                        logger.info("Task cancelled during plan message")
                                         break
                                 elif event == "error":
                                     try:
                                         yield SSEMessage.error(data.get("error", "Unknown error"))
-                                    except (GeneratorExit, asyncio.CancelledError):
+                                    except GeneratorExit:
                                         logger.info("Client disconnected during error message")
+                                        raise  # 重新抛出，让外层处理
+                                    except asyncio.CancelledError:
+                                        logger.info("Task cancelled during error message")
                                         break
+                        except GeneratorExit:
+                            # 客户端断开，重新抛出
+                            raise
                         except Exception as e:
                             logger.warning(f"Failed to process SSE message: {str(e)}")
                 
@@ -602,21 +720,33 @@ async def _execute_analysis_stream(
                                             step=data.get("step"),
                                         )
                                         last_progress_time = asyncio.get_event_loop().time()
-                                    except (GeneratorExit, asyncio.CancelledError):
+                                    except GeneratorExit:
                                         logger.info("Client disconnected during progress message")
+                                        raise  # 重新抛出，让外层处理
+                                    except asyncio.CancelledError:
+                                        logger.info("Task cancelled during progress message")
                                         break
                                 elif event == "plan":
                                     try:
                                         yield SSEMessage.plan(data.get("steps", []))
-                                    except (GeneratorExit, asyncio.CancelledError):
+                                    except GeneratorExit:
                                         logger.info("Client disconnected during plan message")
+                                        raise  # 重新抛出，让外层处理
+                                    except asyncio.CancelledError:
+                                        logger.info("Task cancelled during plan message")
                                         break
                                 elif event == "error":
                                     try:
                                         yield SSEMessage.error(data.get("error", "Unknown error"))
-                                    except (GeneratorExit, asyncio.CancelledError):
+                                    except GeneratorExit:
                                         logger.info("Client disconnected during error message")
+                                        raise  # 重新抛出，让外层处理
+                                    except asyncio.CancelledError:
+                                        logger.info("Task cancelled during error message")
                                         break
+                        except GeneratorExit:
+                            # 客户端断开，重新抛出
+                            raise
                         except asyncio.TimeoutError:
                             break
                     break
@@ -638,8 +768,47 @@ async def _execute_analysis_stream(
                         pass
             # GeneratorExit 需要重新抛出，让生成器正常关闭
             # Agent 任务会继续运行（已注册，服务器关闭时会取消）
+            # 注意：不要在这里取消 agent_task，让它在后台继续运行
             raise
-        except (asyncio.CancelledError, KeyboardInterrupt) as e:
+        except asyncio.CancelledError as e:
+            # 检查是否是 GeneratorExit 导致的 CancelledError
+            # 如果是客户端断开（GeneratorExit），不应该取消 Agent 任务
+            # 只有在服务器关闭或明确取消时才取消 Agent 任务
+            
+            logger.warning(f"Analysis stream cancelled: {type(e).__name__}")
+            logger.warning(f"Agent completed: {agent_completed}, Agent task done: {agent_task.done()}")
+            
+            # 检查 Agent 任务是否已经被取消
+            if agent_task.done():
+                try:
+                    agent_task.result()  # 如果任务已完成，获取结果不会抛出异常
+                    # 任务已完成，不需要取消
+                    logger.info("Agent task already completed, not cancelling")
+                except asyncio.CancelledError:
+                    # 任务被取消，可能是 GeneratorExit 传播导致的
+                    # 不在这里进一步处理，让 Agent 任务保持取消状态
+                    # 但不要重新取消它
+                    logger.warning(f"Agent task was cancelled, may be due to GeneratorExit propagation")
+            else:
+                # Agent 任务还在运行
+                # 如果是 GeneratorExit 导致的 CancelledError，不应该取消 Agent 任务
+                # 只有在明确的服务器关闭（KeyboardInterrupt）时才取消
+                # 这里我们假设 CancelledError 可能是 GeneratorExit 传播导致的，所以不取消 Agent 任务
+                logger.info("Agent task still running, not cancelling (may be due to client disconnect)")
+            
+            # 不取消 Agent 任务，让它继续在后台运行
+            # 只取消消息队列相关的任务
+            for task in pending_tasks:
+                if not task.done() and task != agent_task:
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, KeyboardInterrupt):
+                        pass
+            
+            # 重新抛出，但不取消 Agent 任务
+            raise
+        except KeyboardInterrupt as e:
             # 服务器关闭（Ctrl+C），必须取消所有 Agent 任务
             logger.warning(f"Analysis stream cancelled by server shutdown: {type(e).__name__}, cancelling all tasks...")
             logger.warning(f"Agent completed: {agent_completed}, Agent task done: {agent_task.done()}")
@@ -679,12 +848,35 @@ async def _execute_analysis_stream(
         if not agent_completed:
             logger.info("Waiting for agent task to complete...")
             try:
-                agent_result = await agent_task
+                # 使用 shield 保护 agent_task，避免被 GeneratorExit 取消
+                shielded_task = asyncio.shield(agent_task)
+                agent_result = await shielded_task
                 logger.info("Agent task completed successfully")
+            except GeneratorExit:
+                # 客户端断开，但 Agent 任务继续运行，不发送错误消息
+                logger.info("Client disconnected while waiting for agent task, agent continues in background")
+                raise  # 重新抛出，让生成器正常关闭
             except asyncio.CancelledError:
-                logger.info("Agent task cancelled")
-                yield SSEMessage.error("分析被取消")
-                return
+                # shield 被取消，但 agent_task 可能还在运行
+                logger.info("Shielded task cancelled while waiting for agent task")
+                # 检查 agent_task 是否还在运行
+                if not agent_task.done():
+                    # Agent 任务还在运行，可能是 GeneratorExit 导致的 shield 取消
+                    # 不发送错误消息，让 Agent 任务继续运行
+                    logger.info("Agent task still running after shield cancellation, not sending error message")
+                    raise  # 重新抛出，让生成器正常关闭
+                else:
+                    # agent_task 已完成或被取消
+                    try:
+                        agent_result = agent_task.result()
+                        agent_completed = True
+                        logger.info("Agent task completed after shield cancellation!")
+                    except asyncio.CancelledError:
+                        # agent_task 被取消，但可能是 GeneratorExit 传播导致的
+                        # 不发送错误消息，让 Agent 任务继续运行（如果可能）
+                        logger.warning("Agent task was cancelled, may be due to GeneratorExit propagation")
+                        # 不发送错误消息，直接退出
+                        raise
         
         logger.info(f"Agent result success: {agent_result.get('success')}")
         if not agent_result.get("success"):

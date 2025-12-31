@@ -13,19 +13,20 @@ from langchain_core.outputs import LLMResult
 class SSECallbackHandler(BaseCallbackHandler):
     """SSE 流式输出 Callback Handler"""
     
-    def __init__(self, message_queue: asyncio.Queue, plan_steps: Optional[List[Dict[str, Any]]] = None):
+    def __init__(self, message_queue: asyncio.Queue, plan_steps: Optional[List[Dict[str, Any]]] = None, event_loop: Optional[asyncio.AbstractEventLoop] = None):
         """
         初始化 SSE Callback Handler
         
         Args:
             message_queue: 用于发送 SSE 消息的异步队列
             plan_steps: 分析计划步骤列表（可选）
+            event_loop: 事件循环（可选，如果提供则直接使用，否则尝试获取）
         """
         super().__init__()
         self.message_queue = message_queue
         self.step_count = 0
         self.total_steps = 0
-        self._loop = None
+        self._loop = event_loop  # 如果提供了事件循环，直接使用
         self._loop_lock = threading.Lock()
         self._cancelled = False  # 标记任务是否已被取消
         self._cancelled_lock = threading.Lock()  # 保护 _cancelled 标志的锁
@@ -35,18 +36,32 @@ class SSECallbackHandler(BaseCallbackHandler):
     def _get_event_loop(self):
         """获取事件循环（线程安全）"""
         with self._loop_lock:
-            if self._loop is None:
+            # 如果已经设置了事件循环，检查是否仍然有效
+            if self._loop is not None:
+                # 检查循环是否已关闭
+                if self._loop.is_closed():
+                    self._loop = None
+                else:
+                    return self._loop
+            
+            # 尝试获取当前运行的事件循环
+            try:
+                self._loop = asyncio.get_running_loop()
+                return self._loop
+            except RuntimeError:
+                # 如果没有运行中的循环，尝试获取主循环
                 try:
-                    # 尝试获取当前运行的事件循环
-                    self._loop = asyncio.get_running_loop()
+                    self._loop = asyncio.get_event_loop()
+                    # 检查循环是否已关闭
+                    if self._loop.is_closed():
+                        self._loop = None
+                        return None
+                    return self._loop
                 except RuntimeError:
-                    # 如果没有运行中的循环，尝试获取主循环
-                    try:
-                        self._loop = asyncio.get_event_loop()
-                    except RuntimeError:
-                        # 如果都没有，返回 None（消息将无法发送）
-                        pass
-            return self._loop
+                    # 如果都没有，返回 None（消息将无法发送）
+                    # 这通常不应该发生，因为应该在创建 handler 时传递事件循环
+                    self._loop = None
+                    return None
     
     def set_cancelled(self):
         """标记任务为已取消"""
