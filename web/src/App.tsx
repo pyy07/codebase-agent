@@ -11,14 +11,18 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [progress, setProgress] = useState<{ message: string; progress: number; step?: string } | null>(null)
+  const [planSteps, setPlanSteps] = useState<Array<{step: number, action: string, target: string, status: string}>>([])
   const [useStreaming, setUseStreaming] = useState(true)
   const [sseBody, setSseBody] = useState<any>(null)
   const timeoutTimerRef = useRef<NodeJS.Timeout | null>(null)
 
   // 使用 useCallback 稳定回调函数，避免 useSSE 的 useEffect 重复执行
   const handleProgress = useCallback((message: string, progress: number, step?: string) => {
-    console.log('handleProgress called:', { message, progress, step })
-    setProgress({ message, progress, step })
+    console.log('handleProgress called:', { message, progress, step, progressType: typeof progress })
+    // 确保 progress 是数字类型
+    const progressValue = typeof progress === 'number' ? progress : parseFloat(String(progress)) || 0
+    console.log('Setting progress state:', { message, progress: progressValue, step })
+    setProgress({ message, progress: progressValue, step })
     // 清除超时定时器（收到进度更新）
     if (timeoutTimerRef.current) {
       clearTimeout(timeoutTimerRef.current)
@@ -41,9 +45,12 @@ function App() {
   }, [])
 
   const handleError = useCallback((errorMsg: string) => {
+    console.log('handleError called:', errorMsg)
     setError(errorMsg)
     setLoading(false)
     setProgress(null)
+    // 注意：不清空 sseBody 和 useStreaming，让 useSSE 自己处理清理
+    // 这样可以在错误后重新连接
     if (timeoutTimerRef.current) {
       clearTimeout(timeoutTimerRef.current)
       timeoutTimerRef.current = null
@@ -51,12 +58,21 @@ function App() {
   }, [])
 
   const handleDone = useCallback(() => {
+    console.log('handleDone called - analysis completed')
+    // 注意：不要在这里清空 progress，因为可能还有结果要显示
+    // 只有在收到 result 时才清空 progress
     setLoading(false)
-    setProgress(null)
+    // 不清空 progress，让用户看到最终状态
+    // setProgress(null)
     if (timeoutTimerRef.current) {
       clearTimeout(timeoutTimerRef.current)
       timeoutTimerRef.current = null
     }
+  }, [])
+
+  const handlePlan = useCallback((steps: Array<{step: number, action: string, target: string, status: string}>) => {
+    console.log('handlePlan called:', steps)
+    setPlanSteps(steps)
   }, [])
 
   // 清理超时定时器
@@ -77,20 +93,28 @@ function App() {
       onResult: handleResult,
       onError: handleError,
       onDone: handleDone,
+      onPlan: handlePlan,
     }
   )
 
   const handleAnalysis = async (input: string, contextFiles: File[], streaming: boolean = true) => {
-    setLoading(true)
+    console.log('handleAnalysis called:', { input, contextFiles: contextFiles.length, streaming })
+    
+    // 先清空之前的状态，确保可以重新发起请求
     setError(null)
     setResult(null)
-    setProgress({ message: '准备开始分析...', progress: 0, step: 'preparing' })
+    setProgress(null)
+    setPlanSteps([])
     
     // 清除之前的超时定时器
     if (timeoutTimerRef.current) {
       clearTimeout(timeoutTimerRef.current)
       timeoutTimerRef.current = null
     }
+    
+    // 设置加载状态和初始进度
+    setLoading(true)
+    setProgress({ message: '准备开始分析...', progress: 0, step: 'preparing' })
 
     try {
       // 处理上下文文件
@@ -116,8 +140,19 @@ function App() {
 
       if (streaming) {
         // 使用 SSE 流式接口
-        setUseStreaming(true)
-        setSseBody(requestBody)
+        // 先重置流式状态，然后设置 sseBody
+        // 使用双 requestAnimationFrame 确保状态重置完成后再设置新值
+        setUseStreaming(false)
+        setSseBody(null)
+        
+        // 使用双 requestAnimationFrame 确保状态重置完成后再设置新值
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            console.log('Setting SSE body:', requestBody)
+            setUseStreaming(true)
+            setSseBody(requestBody)
+          })
+        })
         return
       }
 
@@ -165,6 +200,28 @@ function App() {
         {(sseError || error) && (
           <div className="error-message">
             <strong>错误：</strong>{sseError || error}
+          </div>
+        )}
+        
+        {planSteps.length > 0 && (
+          <div className="plan-steps" style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
+            <h3 style={{ marginTop: 0, marginBottom: '10px' }}>分析计划</h3>
+            <ol style={{ margin: 0, paddingLeft: '20px' }}>
+              {planSteps.map((step, index) => (
+                <li key={index} style={{ 
+                  marginBottom: '8px',
+                  color: step.status === 'completed' ? '#28a745' : 
+                         step.status === 'running' ? '#007bff' : 
+                         step.status === 'failed' ? '#dc3545' : '#666'
+                }}>
+                  <strong>步骤 {step.step}:</strong> {step.action}
+                  {step.target && <span> - {step.target}</span>}
+                  {step.status === 'completed' && <span> ✓</span>}
+                  {step.status === 'running' && <span> ⟳</span>}
+                  {step.status === 'failed' && <span> ✗</span>}
+                </li>
+              ))}
+            </ol>
           </div>
         )}
         

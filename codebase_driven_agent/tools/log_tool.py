@@ -80,6 +80,15 @@ class LogTool(BaseCodebaseTool):
         offset: int = 0,
     ) -> ToolResult:
         """执行日志查询"""
+        # 检查全局停止标志
+        from codebase_driven_agent.utils.log_query import _shutdown_event
+        if _shutdown_event.is_set():
+            logger.warning("LogTool execution cancelled due to server shutdown")
+            return ToolResult(
+                success=False,
+                error="Server is shutting down, log query cancelled."
+            )
+        
         try:
             # 使用默认 appname 如果未提供
             if not appname:
@@ -102,6 +111,7 @@ class LogTool(BaseCodebaseTool):
             end_dt = self._parse_time(end_time)
             
             # 如果没有指定时间范围，默认查询最近1小时
+            # 注意：LogyiLogQuery 会自动检测这种自动生成的时间范围，并在缓存键中忽略它
             if not start_dt and not end_dt:
                 end_dt = datetime.now()
                 start_dt = end_dt - timedelta(hours=1)
@@ -140,11 +150,21 @@ class LogTool(BaseCodebaseTool):
             logger.info(f"  Logs Count: {len(result.logs)}")
             logger.info(f"  Has More: {result.has_more}")
             logger.info(f"  Final SPL Query: {result.query}")
-            # 打印前几条日志的预览
+            # 打印前几条日志的预览（仅打印 raw_message）
             if result.logs:
-                logger.info("  Sample Logs (first 3):")
+                logger.info("  Sample Logs (first 3, raw_message only):")
                 for i, log_entry in enumerate(result.logs[:3], 1):
-                    logger.info(f"    [{i}] {log_entry.get('timestamp', 'N/A')} [{log_entry.get('level', 'INFO')}] {log_entry.get('message', '')[:100]}...")
+                    # 仅打印 raw_message 字段
+                    raw_message = log_entry.get('raw_message', '')
+                    if raw_message:
+                        logger.info(f"    [{i}] {raw_message}")
+                    else:
+                        # 如果没有 raw_message，打印 message 作为后备
+                        message = log_entry.get('message', '')
+                        if message:
+                            logger.info(f"    [{i}] {message}")
+                        else:
+                            logger.info(f"    [{i}] (no raw_message or message field)")
             logger.info("=" * 80)
             
             # 格式化结果
@@ -155,8 +175,14 @@ class LogTool(BaseCodebaseTool):
                 )
             
             # 构建结果文本
+            # 检查是否是缓存结果
+            is_cached = getattr(result, '_from_cache', False)
+            cache_note = "\n[⚠️ 注意：这是缓存的结果，避免重复查询相同的日志]\n" if is_cached else ""
+            
             result_text = f"Found {result.total} log entries (showing {len(result.logs)}):\n\n"
             result_text += f"Query: {result.query}\n"
+            if is_cached:
+                result_text += cache_note
             if result.has_more:
                 result_text += f"[Note: More results available, use offset={offset+limit} to get next page]\n"
             result_text += "\n" + "="*80 + "\n\n"

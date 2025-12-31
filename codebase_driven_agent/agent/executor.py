@@ -247,21 +247,22 @@ def create_agent_executor(
     
     # 使用新的 create_agent API (LangChain 1.0+)
     logger.info("Creating agent with LangChain create_agent API...")
-    agent = create_agent(
+    agent_runnable = create_agent(
         model=llm,
         tools=tools,
         system_prompt=system_prompt,
     )
     logger.info("Agent created successfully")
     
+    # 在 LangChain 1.0+ 中，create_agent 返回的 agent 可以直接使用
     # 存储配置信息供后续使用
-    agent._max_iterations = max_iterations or settings.agent_max_iterations
-    agent._max_execution_time = max_execution_time or settings.agent_max_execution_time
-    agent._callbacks = callbacks or []
+    agent_runnable._max_iterations = max_iterations or settings.agent_max_iterations
+    agent_runnable._max_execution_time = max_execution_time or settings.agent_max_execution_time
+    agent_runnable._callbacks = callbacks or []
     
-    logger.info(f"Agent configured: max_iterations={agent._max_iterations}, max_execution_time={agent._max_execution_time}")
+    logger.info(f"Agent configured: max_iterations={agent_runnable._max_iterations}, max_execution_time={agent_runnable._max_execution_time}")
     
-    return agent
+    return agent_runnable
 
 
 class AgentExecutorWrapper:
@@ -322,10 +323,16 @@ class AgentExecutorWrapper:
                 ]
             }
             # 如果有 callbacks，添加到 config 中
+            # 同时传递 max_iterations 配置（LangChain 1.0+ 支持通过 config 传递）
             config = {}
             if self.callbacks:
                 config["callbacks"] = self.callbacks
                 logger.info(f"Using {len(self.callbacks)} callback handlers")
+            
+            # 传递 max_iterations 配置
+            if hasattr(self.executor, '_max_iterations'):
+                config["max_iterations"] = self.executor._max_iterations
+                logger.info(f"Setting max_iterations={config['max_iterations']}")
 
             # 打印请求信息（用于调试）
             logger.info("=" * 80)
@@ -338,21 +345,37 @@ class AgentExecutorWrapper:
             logger.info(f"  Input Preview (first 500 chars): {full_input[:500]}...")
             logger.info("=" * 80)
             
+            # 在调用之前检查是否已取消
+            for callback in self.callbacks:
+                if hasattr(callback, 'is_cancelled') and callback.is_cancelled():
+                    logger.warning("Task already cancelled before LLM call, exiting immediately")
+                    raise asyncio.CancelledError("Task has been cancelled")
+            
             logger.info("Invoking agent executor (this may take a while for LLM calls)...")
             
-            # 使用 functools.partial 来传递多个参数
-            from functools import partial
-            invoke_func = partial(self.executor.invoke, input_data, config=config if config else None)
+            # 创建一个包装函数，在调用前检查取消状态
+            def invoke_with_cancel_check():
+                """包装 invoke 调用，在执行前检查取消状态"""
+                # 检查是否已取消，如果已取消，直接退出
+                for callback in self.callbacks:
+                    if hasattr(callback, 'is_cancelled') and callback.is_cancelled():
+                        logger.warning("Task cancelled before invoke, exiting immediately")
+                        # 直接抛出 CancelledError，让上层处理
+                        raise KeyboardInterrupt("Task has been cancelled")
+                
+                # 执行 invoke
+                return self.executor.invoke(input_data, config=config if config else None)
             
             try:
                 logger.info("Starting asyncio.to_thread for executor.invoke...")
                 # 添加超时保护，避免 LLM 调用无限期阻塞
                 max_execution_time = self.executor._max_execution_time if hasattr(self.executor, '_max_execution_time') else 300
                 logger.info(f"LLM call timeout set to {max_execution_time} seconds")
-                # 使用 shield 保护 LLM 调用，避免被外部取消影响（但 shield 不能完全防止取消）
-                # 实际上，我们需要让 LLM 调用在后台继续运行
+                
+                # 使用 asyncio.to_thread 在线程池中执行同步的 invoke 调用
+                # 使用 wait_for 来确保超时和取消能够生效
                 result = await asyncio.wait_for(
-                    asyncio.to_thread(invoke_func),
+                    asyncio.to_thread(invoke_with_cancel_check),
                     timeout=max_execution_time
                 )
                 logger.info("asyncio.to_thread completed, got result")
@@ -360,10 +383,20 @@ class AgentExecutorWrapper:
                 logger.error(f"LLM call timed out after {max_execution_time} seconds")
                 raise TimeoutError(f"Agent execution timed out after {max_execution_time} seconds")
             except asyncio.CancelledError:
-                logger.warning("Agent executor was cancelled (LLM call may continue in thread)")
-                # 即使被取消，LLM 调用在 to_thread 中可能仍在运行
-                # 但我们仍然需要重新抛出 CancelledError，让上层知道
+                logger.warning("Agent executor was cancelled, exiting immediately")
+                # 通知所有 callback handler 任务已被取消
+                for callback in self.callbacks:
+                    if hasattr(callback, 'set_cancelled'):
+                        try:
+                            callback.set_cancelled()
+                        except Exception as e:
+                            logger.debug(f"Failed to set cancelled on callback: {e}")
+                # 重新抛出 CancelledError，立即退出
                 raise
+            except KeyboardInterrupt:
+                # 如果是在线程中检测到取消，转换为 CancelledError
+                logger.warning("KeyboardInterrupt caught in thread, exiting immediately")
+                raise asyncio.CancelledError("Task cancelled") from None
             except Exception as e:
                 error_msg = str(e)
                 # 处理常见的 LLM API 错误，提供更友好的错误信息

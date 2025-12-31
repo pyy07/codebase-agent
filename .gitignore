@@ -19,6 +19,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
 # Virtual Environment
 venv/
@@ -33,27 +34,41 @@ ENV/
 *.swo
 *~
 
-# Environment
+# Environment variables
 .env
 .env.local
 .env.*.local
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
 
 # Logs
 *.log
 logs/
 
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Node modules
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+web/dist/
+web/build/
+*.egg-info/
+
 # OS
 .DS_Store
 Thumbs.db
 
-# Project specific
-*.db
-*.sqlite
-task_storage/
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
 
+# Temporary files
+*.tmp
+*.temp
+.cache/

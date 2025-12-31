@@ -1,7 +1,7 @@
 """LangChain Callbacks 实现"""
 import asyncio
 import threading
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.agents import AgentAction, AgentFinish
 from codebase_driven_agent.utils.logger import setup_logger
@@ -13,12 +13,13 @@ from langchain_core.outputs import LLMResult
 class SSECallbackHandler(BaseCallbackHandler):
     """SSE 流式输出 Callback Handler"""
     
-    def __init__(self, message_queue: asyncio.Queue):
+    def __init__(self, message_queue: asyncio.Queue, plan_steps: Optional[List[Dict[str, Any]]] = None):
         """
         初始化 SSE Callback Handler
         
         Args:
             message_queue: 用于发送 SSE 消息的异步队列
+            plan_steps: 分析计划步骤列表（可选）
         """
         super().__init__()
         self.message_queue = message_queue
@@ -26,6 +27,10 @@ class SSECallbackHandler(BaseCallbackHandler):
         self.total_steps = 0
         self._loop = None
         self._loop_lock = threading.Lock()
+        self._cancelled = False  # 标记任务是否已被取消
+        self._cancelled_lock = threading.Lock()  # 保护 _cancelled 标志的锁
+        self.plan_steps = plan_steps or []  # 分析计划步骤
+        self.current_step_index = 0  # 当前执行的步骤索引
     
     def _get_event_loop(self):
         """获取事件循环（线程安全）"""
@@ -43,40 +48,62 @@ class SSECallbackHandler(BaseCallbackHandler):
                         pass
             return self._loop
     
+    def set_cancelled(self):
+        """标记任务为已取消"""
+        with self._cancelled_lock:
+            self._cancelled = True
+    
+    def is_cancelled(self) -> bool:
+        """检查任务是否已被取消"""
+        with self._cancelled_lock:
+            return self._cancelled
+    
     def _send_message(self, event: str, data: Dict[str, Any]):
         """发送 SSE 消息（同步方法，内部使用 asyncio）"""
+        # 如果任务已被取消，不发送消息
+        if self.is_cancelled():
+            logger.debug(f"Message not sent (cancelled): {event}")
+            return
+        
         try:
             loop = self._get_event_loop()
             if loop is None:
-                # 无法获取事件循环，跳过消息
+                # 无法获取事件循环，记录警告
+                logger.warning(f"Failed to get event loop, message not sent: {event}")
                 return
+            
+            message_data = {
+                "event": event,
+                "data": data,
+            }
             
             # 使用 run_coroutine_threadsafe 在同步上下文中调用异步方法
             if loop.is_running():
-                # 如果循环正在运行，使用 create_task
-                asyncio.run_coroutine_threadsafe(
-                    self.message_queue.put({
-                        "event": event,
-                        "data": data,
-                    }),
+                # 如果循环正在运行，使用 run_coroutine_threadsafe
+                future = asyncio.run_coroutine_threadsafe(
+                    self.message_queue.put(message_data),
                     loop
                 )
+                # 记录消息发送
+                logger.debug(f"Message queued via run_coroutine_threadsafe: {event}, data keys: {list(data.keys())}")
             else:
                 # 如果循环未运行，直接运行（这种情况应该很少见）
                 loop.run_until_complete(
-                    self.message_queue.put({
-                        "event": event,
-                        "data": data,
-                    })
+                    self.message_queue.put(message_data)
                 )
-        except Exception:
-            # 如果队列已关闭或其他错误，忽略
-            pass
+                logger.debug(f"Message queued via run_until_complete: {event}, data keys: {list(data.keys())}")
+        except Exception as e:
+            # 记录错误，而不是忽略
+            logger.error(f"Failed to send message ({event}): {str(e)}", exc_info=True)
     
     def on_llm_start(
         self, serialized: Dict[str, Any], prompts: List[str], **kwargs: Any
     ) -> None:
         """LLM 开始调用"""
+        # 如果任务已被取消，直接退出，不执行任何操作
+        if self.is_cancelled():
+            return
+        
         logger.info("LLM call started")
         # 打印请求详情（debug 级别）
         logger.debug("=" * 80)
@@ -125,6 +152,10 @@ class SSECallbackHandler(BaseCallbackHandler):
     
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
         """LLM 调用结束"""
+        # 如果任务已被取消，直接退出，不执行任何操作
+        if self.is_cancelled():
+            return
+        
         logger.info("LLM call completed")
         # 打印响应详情（debug 级别）
         if response:
@@ -180,9 +211,21 @@ class SSECallbackHandler(BaseCallbackHandler):
         self, serialized: Dict[str, Any], input_str: str, **kwargs: Any
     ) -> None:
         """工具开始调用"""
+        # 如果任务已被取消，直接退出，不执行任何操作
+        if self.is_cancelled():
+            return
+        
         tool_name = serialized.get("name", "unknown")
         self.step_count += 1
         logger.info(f"Tool started: {tool_name}, input: {input_str[:100]}")
+        
+        # 更新计划步骤状态
+        if self.plan_steps and self.current_step_index < len(self.plan_steps):
+            self.plan_steps[self.current_step_index]["status"] = "running"
+            # 发送步骤更新消息
+            self._send_message("plan", {
+                "steps": self.plan_steps,
+            })
         
         # 根据工具类型发送不同的进度消息
         step_messages = {
@@ -196,21 +239,45 @@ class SSECallbackHandler(BaseCallbackHandler):
             (f"正在调用工具: {tool_name}...", "tool_execution", 0.5)
         )
         
+        # 如果有计划步骤，在消息中包含步骤信息
+        step_info = None
+        if self.plan_steps and self.current_step_index < len(self.plan_steps):
+            step_info = self.plan_steps[self.current_step_index]
+            message = f"步骤 {step_info['step']}: {message}"
+        
         self._send_message("progress", {
             "message": message,
             "progress": progress,
             "step": step,
             "tool": tool_name,
             "input": input_str[:100] if len(input_str) > 100 else input_str,  # 截断输入
+            "step_info": step_info,
         })
     
     def on_tool_end(self, output: str, **kwargs: Any) -> None:
         """工具调用结束"""
-        # 可以在这里发送工具执行结果（可选，避免信息过多）
-        pass
+        # 更新计划步骤状态为完成
+        if self.plan_steps and self.current_step_index < len(self.plan_steps):
+            self.plan_steps[self.current_step_index]["status"] = "completed"
+            # 发送步骤更新消息
+            self._send_message("plan", {
+                "steps": self.plan_steps,
+            })
+            # 移动到下一步
+            self.current_step_index += 1
     
     def on_tool_error(self, error: Exception, **kwargs: Any) -> None:
         """工具调用错误"""
+        # 更新计划步骤状态为失败
+        if self.plan_steps and self.current_step_index < len(self.plan_steps):
+            self.plan_steps[self.current_step_index]["status"] = "failed"
+            # 发送步骤更新消息
+            self._send_message("plan", {
+                "steps": self.plan_steps,
+            })
+            # 移动到下一步
+            self.current_step_index += 1
+        
         self._send_message("progress", {
             "message": f"工具执行出错: {str(error)}",
             "progress": 0.8,
@@ -219,6 +286,10 @@ class SSECallbackHandler(BaseCallbackHandler):
     
     def on_agent_action(self, action: AgentAction, **kwargs: Any) -> None:
         """Agent 执行动作"""
+        # 如果任务已被取消，直接退出，不执行任何操作
+        if self.is_cancelled():
+            return
+        
         # Agent 决定调用某个工具
         tool_name = action.tool
         logger.info(f"Agent action: calling tool {tool_name}")
@@ -232,12 +303,19 @@ class SSECallbackHandler(BaseCallbackHandler):
         
         message = tool_messages.get(tool_name, f"正在调用工具: {tool_name}...")
         
+        # 如果有计划步骤，在消息中包含步骤信息
+        step_info = None
+        if self.plan_steps and self.current_step_index < len(self.plan_steps):
+            step_info = self.plan_steps[self.current_step_index]
+            message = f"步骤 {step_info['step']}: {message}"
+        
         self._send_message("progress", {
             "message": message,
             "progress": 0.5,
             "step": "agent_action",
             "tool": tool_name,
             "thought": action.log[:200] if hasattr(action, 'log') and action.log else None,  # Agent 的思考过程
+            "step_info": step_info,
         })
     
     def on_agent_finish(self, finish: AgentFinish, **kwargs: Any) -> None:

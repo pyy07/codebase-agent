@@ -64,6 +64,9 @@ def setup_logger(
     if logger.handlers:
         return logger
     
+    # 禁用日志传播，避免重复打印（父 logger 不应该处理子 logger 的消息）
+    logger.propagate = False
+    
     # 控制台处理器
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(level)

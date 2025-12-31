@@ -3,11 +3,15 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Optional, Any
 from datetime import datetime
 from pydantic import BaseModel, Field
+import threading
 
 from codebase_driven_agent.config import settings
 from codebase_driven_agent.utils.logger import setup_logger
 
 logger = setup_logger("codebase_driven_agent.utils.log_query")
+
+# 全局停止标志，用于在服务器关闭时中断日志查询
+_shutdown_event = threading.Event()
 
 
 class LogQueryResult(BaseModel):
@@ -52,12 +56,13 @@ class LogQueryInterface(ABC):
         pass
     
     @abstractmethod
-    def validate_query(self, query: str) -> tuple[bool, Optional[str]]:
+    def validate_query(self, query: str, appname: Optional[str] = None) -> tuple[bool, Optional[str]]:
         """
         验证查询语句
         
         Args:
             query: 查询语句
+            appname: 应用名称（可选，某些实现可能需要）
         
         Returns:
             (is_valid, error_message)
@@ -74,8 +79,17 @@ class LogyiLogQuery(LogQueryInterface):
         self.api_key = settings.logyi_apikey
         self.default_appname = settings.logyi_appname
         
+        # 初始化查询缓存：key 为 SPL 查询语句（字符串），value 为 LogQueryResult
+        # 缓存仅在当次请求生效，每次新请求时会清空
+        self._query_cache: Dict[str, LogQueryResult] = {}
+        
         if not self.base_url or not self.username or not self.api_key:
             logger.warning("Logyi configuration incomplete, LogyiLogQuery may not work properly")
+    
+    def clear_cache(self):
+        """清空查询缓存（在每次新请求开始时调用）"""
+        self._query_cache.clear()
+        logger.debug("Logyi query cache cleared")
     
     def _build_spl_query(
         self,
@@ -100,8 +114,14 @@ class LogyiLogQuery(LogQueryInterface):
         # 这样可以保持 SPL 查询的简洁性
         return spl_query
     
-    def validate_query(self, query: str) -> tuple[bool, Optional[str]]:
-        """验证 SPL 查询语句"""
+    def validate_query(self, query: str, appname: Optional[str] = None) -> tuple[bool, Optional[str]]:
+        """
+        验证 SPL 查询语句
+        
+        Args:
+            query: 查询语句
+            appname: 应用名称（如果提供，且查询中没有 appname，会自动添加，不发出警告）
+        """
         if not query or not query.strip():
             return False, "Query cannot be empty"
         
@@ -113,9 +133,16 @@ class LogyiLogQuery(LogQueryInterface):
             if keyword in query_lower:
                 return False, f"Dangerous keyword '{keyword}' detected in query"
         
-        # 检查 appname 是否存在（虽然不是强制，但建议有）
+        # 检查 appname 是否存在
+        # 如果提供了 appname 参数，且查询中没有 appname，会被自动添加，不需要警告
+        # 只有在没有提供 appname 参数且查询中也没有 appname 时，才发出警告
         if "appname:" not in query_lower:
-            logger.warning("Query does not contain appname filter, it will be added automatically")
+            if appname:
+                # 提供了 appname 参数，会被自动添加，使用 debug 级别记录
+                logger.debug(f"Query does not contain appname filter, will be added automatically with appname: {appname}")
+            else:
+                # 没有提供 appname 参数，发出警告
+                logger.warning("Query does not contain appname filter, it will be added automatically if appname is provided")
         
         return True, None
     
@@ -141,8 +168,8 @@ class LogyiLogQuery(LogQueryInterface):
                 query=query,
             )
         
-        # 验证查询
-        is_valid, error_msg = self.validate_query(query)
+        # 验证查询（传入 appname，如果提供了 appname，不会发出警告）
+        is_valid, error_msg = self.validate_query(query, appname=appname)
         if not is_valid:
             logger.error(f"Invalid SPL query: {error_msg}")
             return LogQueryResult(
@@ -154,6 +181,23 @@ class LogyiLogQuery(LogQueryInterface):
         
         # 构建完整的 SPL 查询
         spl_query = self._build_spl_query(appname, query, start_time, end_time)
+        
+        # 缓存键只使用 SPL 查询语句本身（忽略 appname、时间范围等参数）
+        cache_key = spl_query
+        
+        # 检查缓存
+        if cache_key in self._query_cache:
+            cached_result = self._query_cache[cache_key]
+            logger.warning(
+                f"SPL query cache hit! Returning cached result for query: {spl_query[:100]}..."
+            )
+            logger.warning(
+                f"Cached result: total={cached_result.total}, logs_count={len(cached_result.logs)}, "
+                f"has_more={cached_result.has_more}"
+            )
+            # 标记这是缓存结果，供 LogTool 使用
+            cached_result._from_cache = True
+            return cached_result
         
         # 打印查询详情（用于调试）
         logger.info("=" * 80)
@@ -223,13 +267,36 @@ class LogyiLogQuery(LogQueryInterface):
                     return [], 0
             
             try:
+                # 检查停止标志（在启动线程之前）
+                if _shutdown_event.is_set():
+                    logger.warning("  Log query cancelled before starting (server shutdown)")
+                    return LogQueryResult(
+                        logs=[],
+                        total=0,
+                        has_more=False,
+                        query=spl_query,
+                    )
+                
                 # 使用线程池执行异步轮询，这样可以响应 KeyboardInterrupt
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(run_async_polling)
                     # 设置超时，稍长于 max_wait_time
-                    logs, total = future.result(timeout=70)
+                    try:
+                        logs, total = future.result(timeout=70)
+                    except concurrent.futures.TimeoutError:
+                        logger.warning("  Log query timeout")
+                        future.cancel()
+                        return LogQueryResult(
+                            logs=[],
+                            total=0,
+                            has_more=False,
+                            query=spl_query,
+                        )
             except KeyboardInterrupt:
                 logger.warning("  Log query interrupted by user (KeyboardInterrupt)")
+                # 取消 future（如果可能）
+                if not future.done():
+                    future.cancel()
                 return LogQueryResult(
                     logs=[],
                     total=0,
@@ -253,12 +320,19 @@ class LogyiLogQuery(LogQueryInterface):
                     query=spl_query,
                 )
             
-            return LogQueryResult(
+            # 构建查询结果
+            result = LogQueryResult(
                 logs=logs[:limit],
                 total=total,
                 has_more=total > offset + limit,
                 query=spl_query,
             )
+            
+            # 缓存查询结果（仅使用 SPL 语句作为 key）
+            self._query_cache[cache_key] = result
+            logger.info(f"Query result cached for SPL: {spl_query[:100]}...")
+            
+            return result
         
         except Exception as e:
             error_msg = f"Error executing Logyi query: {str(e)}"
@@ -447,10 +521,20 @@ class LogyiLogQuery(LogQueryInterface):
                 )
             
             while (time.time() * 1000 - start_time) < max_wait_time:
+                # 检查全局停止标志（在每次循环开始时检查）
+                if _shutdown_event.is_set():
+                    logger.warning("  Polling interrupted by server shutdown")
+                    return [], 0
+                
                 poll_count += 1
                 elapsed = int(time.time() * 1000 - start_time)
                 
                 logger.info(f"  Poll #{poll_count} (elapsed: {elapsed}ms)")
+                
+                # 再次检查停止标志（在发送请求前）
+                if _shutdown_event.is_set():
+                    logger.warning("  Polling interrupted by server shutdown (before request)")
+                    return [], 0
                 
                 try:
                     # 使用 asyncio.to_thread 将同步请求转换为异步
@@ -460,6 +544,11 @@ class LogyiLogQuery(LogQueryInterface):
                     raise
                 except Exception as e:
                     logger.error(f"  Request failed: {str(e)}")
+                    return [], 0
+                
+                # 再次检查停止标志（在请求之后）
+                if _shutdown_event.is_set():
+                    logger.warning("  Polling interrupted by server shutdown after request")
                     return [], 0
                 
                 if response.status_code != 200:
@@ -480,12 +569,25 @@ class LogyiLogQuery(LogQueryInterface):
                 if job_status_lower in ["running", "pending"]:
                     progress = data.get("progress", 0)
                     logger.info(f"  Search task running (status: {job_status}), progress: {progress}%")
-                    # 使用异步 sleep，避免阻塞事件循环
-                    try:
-                        await asyncio.sleep(poll_interval / 1000)
-                    except asyncio.CancelledError:
-                        logger.warning("  Polling cancelled during sleep")
-                        raise
+                    # 使用异步 sleep，避免阻塞事件循环（分段等待，每 0.1 秒检查一次停止标志）
+                    wait_time = poll_interval / 1000
+                    waited = 0
+                    while waited < wait_time:
+                        if _shutdown_event.is_set():
+                            logger.warning("  Polling interrupted during sleep")
+                            return [], 0
+                        sleep_interval = min(0.1, wait_time - waited)
+                        try:
+                            await asyncio.sleep(sleep_interval)
+                        except asyncio.CancelledError:
+                            logger.warning("  Polling cancelled during sleep")
+                            raise
+                        waited += sleep_interval
+                    
+                    # 检查停止标志（在 sleep 之后）
+                    if _shutdown_event.is_set():
+                        logger.warning("  Polling interrupted by server shutdown after sleep")
+                        return [], 0
                     continue
                 
                 if job_status_lower in ["failed", "error"]:
@@ -649,8 +751,14 @@ class FileLogQuery(LogQueryInterface):
         
         return log_files
     
-    def validate_query(self, query: str) -> tuple[bool, Optional[str]]:
-        """验证查询语句（文件日志使用简单关键词查询）"""
+    def validate_query(self, query: str, appname: Optional[str] = None) -> tuple[bool, Optional[str]]:
+        """
+        验证查询语句（文件日志使用简单关键词查询）
+        
+        Args:
+            query: 查询语句
+            appname: 应用名称（可选，文件日志查询不使用）
+        """
         if not query or not query.strip():
             return False, "Query cannot be empty"
         

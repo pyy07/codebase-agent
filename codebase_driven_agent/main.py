@@ -1,6 +1,7 @@
 """FastAPI 应用入口"""
 import asyncio
 import threading
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -77,10 +78,41 @@ def print_configuration():
     
     logger.info("=" * 80)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    # 启动时的操作（如果需要）
+    logger.info("Application startup")
+    yield
+    # 关闭时的操作
+    logger.info("Server shutting down, cancelling all active agent tasks...")
+    try:
+        # 设置全局停止标志，中断所有日志查询
+        from codebase_driven_agent.utils.log_query import _shutdown_event
+        _shutdown_event.set()
+        logger.info("Shutdown event set, interrupting all log queries...")
+        
+        from codebase_driven_agent.api.sse import cancel_all_agent_tasks
+        # 设置超时，避免关闭流程卡住
+        await asyncio.wait_for(cancel_all_agent_tasks(), timeout=2.0)
+        logger.info("Server shutdown complete")
+    except asyncio.TimeoutError:
+        logger.warning("Shutdown timeout, forcing exit...")
+        import os
+        os._exit(0)
+    except Exception as e:
+        logger.error(f"Error during shutdown: {str(e)}", exc_info=True)
+        # 即使出错也强制退出
+        import os
+        os._exit(0)
+
+
 app = FastAPI(
     title="Codebase Driven Agent",
     description="基于代码库驱动的通用 AI Agent 平台。当前阶段专注于问题分析和错误排查，未来将扩展到更多代码库驱动场景。",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # CORS 中间件
@@ -218,20 +250,54 @@ _start_cache_cleanup_task()
 if __name__ == "__main__":
     import uvicorn
     import signal
+    import os
     import sys
     
-    def signal_handler(sig, frame):
-        """处理 Ctrl+C 信号"""
-        logger.info("\n收到中断信号 (Ctrl+C)，正在关闭服务...")
-        sys.exit(0)
+    _shutdown_count = 0
     
-    # 注册信号处理器
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    def exit_handler(signum, frame):
+        """退出处理器"""
+        global _shutdown_count
+        _shutdown_count += 1
+        
+        # 立即设置停止标志，让所有后台任务知道要停止
+        from codebase_driven_agent.utils.log_query import _shutdown_event
+        _shutdown_event.set()
+        logger.warning("Shutdown event set, all background tasks should stop")
+        
+        if _shutdown_count == 1:
+            # 第一次 Ctrl+C：尝试优雅关闭
+            logger.info("Ctrl+C received, starting graceful shutdown...")
+            logger.info("Press Ctrl+C again to force exit immediately")
+            # 设置一个定时器，如果 2 秒内没有第二次 Ctrl+C，就强制退出
+            import threading
+            def force_exit_after_delay():
+                import time
+                time.sleep(2)
+                if _shutdown_count == 1:
+                    logger.warning("Graceful shutdown timeout, forcing exit...")
+                    os._exit(0)
+            threading.Thread(target=force_exit_after_delay, daemon=True).start()
+        else:
+            # 第二次 Ctrl+C：立即强制退出
+            logger.warning("Force exit signal received, terminating immediately...")
+            os._exit(0)
     
+    # 注册信号处理器（在 uvicorn.run 之前）
+    signal.signal(signal.SIGINT, exit_handler)
+    signal.signal(signal.SIGTERM, exit_handler)
+    
+    # uvicorn 会自动处理 SIGINT (Ctrl+C) 和 KeyboardInterrupt
+    # 但我们的信号处理器会先执行
     try:
-        uvicorn.run(app, host="0.0.0.0", port=8000)
+        uvicorn.run(
+            app, 
+            host="0.0.0.0", 
+            port=8000,
+            log_level=settings.log_level.lower(),
+            timeout_keep_alive=2,  # 减少 keep-alive 超时，加快关闭
+        )
     except KeyboardInterrupt:
-        logger.info("服务被用户中断")
+        logger.info("KeyboardInterrupt received, shutting down...")
         sys.exit(0)
 
