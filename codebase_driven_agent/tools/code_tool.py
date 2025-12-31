@@ -1,6 +1,7 @@
 """代码工具实现"""
 import os
 import re
+import threading
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -10,6 +11,9 @@ from codebase_driven_agent.config import settings
 from codebase_driven_agent.utils.logger import setup_logger
 
 logger = setup_logger("codebase_driven_agent.tools.code")
+
+# 全局取消标志，用于在任务取消时中断代码查询
+_cancellation_event = threading.Event()
 
 try:
     import git
@@ -77,6 +81,11 @@ class CodeTool(BaseCodebaseTool):
     
     def _search_files(self, query: str) -> List[Path]:
         """搜索匹配的文件"""
+        # 检查是否已取消
+        if _cancellation_event.is_set():
+            logger.warning("Code search cancelled before starting")
+            raise KeyboardInterrupt("Code search cancelled")
+        
         matches = []
         query_lower = query.lower()
         
@@ -88,6 +97,11 @@ class CodeTool(BaseCodebaseTool):
         
         # 递归搜索文件
         for root, dirs, files in os.walk(self.repo_path):
+            # 检查是否已取消
+            if _cancellation_event.is_set():
+                logger.warning("Code search cancelled during file walk")
+                raise KeyboardInterrupt("Code search cancelled")
+            
             # 跳过隐藏目录和常见忽略目录
             dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['__pycache__', 'node_modules', '.git']]
             
@@ -117,6 +131,11 @@ class CodeTool(BaseCodebaseTool):
     
     def _search_with_ripgrep(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
         """使用 ripgrep 进行快速代码搜索"""
+        # 检查是否已取消
+        if _cancellation_event.is_set():
+            logger.warning("Ripgrep search cancelled before starting")
+            raise KeyboardInterrupt("Ripgrep search cancelled")
+        
         if not RIPGREP_AVAILABLE:
             return []
         
@@ -130,6 +149,11 @@ class CodeTool(BaseCodebaseTool):
             seen_files = set()
             
             for match in rg.run().as_dict:
+                # 检查是否已取消
+                if _cancellation_event.is_set():
+                    logger.warning("Ripgrep search cancelled during iteration")
+                    raise KeyboardInterrupt("Ripgrep search cancelled")
+                
                 file_path = match.get('data', {}).get('path', {}).get('text', '')
                 line_number = match.get('data', {}).get('line_number', 0)
                 line_text = match.get('data', {}).get('lines', {}).get('text', '').strip()
@@ -159,6 +183,8 @@ class CodeTool(BaseCodebaseTool):
                     break
             
             return results
+        except KeyboardInterrupt:
+            raise
         except Exception as e:
             logger.warning(f"Ripgrep search failed: {str(e)}, falling back to file search")
             return []
@@ -265,18 +291,33 @@ class CodeTool(BaseCodebaseTool):
     
     def _get_directory_structure(self, dir_path: Path, max_depth: int = 2) -> str:
         """获取目录结构"""
+        # 检查是否已取消
+        if _cancellation_event.is_set():
+            logger.warning("Directory structure query cancelled before starting")
+            raise KeyboardInterrupt("Directory structure query cancelled")
+        
         if not dir_path.exists() or not dir_path.is_dir():
             return f"Directory not found: {dir_path}"
         
         structure = []
         
         def _walk_dir(path: Path, prefix: str = "", depth: int = 0):
+            # 检查是否已取消
+            if _cancellation_event.is_set():
+                logger.warning("Directory walk cancelled during traversal")
+                raise KeyboardInterrupt("Directory walk cancelled")
+            
             if depth > max_depth:
                 return
             
             try:
                 items = sorted(path.iterdir(), key=lambda x: (x.is_file(), x.name))
                 for i, item in enumerate(items):
+                    # 检查是否已取消（在每次迭代时检查）
+                    if _cancellation_event.is_set():
+                        logger.warning("Directory walk cancelled during iteration")
+                        raise KeyboardInterrupt("Directory walk cancelled")
+                    
                     is_last = i == len(items) - 1
                     current_prefix = "└── " if is_last else "├── "
                     structure.append(f"{prefix}{current_prefix}{item.name}")
@@ -287,11 +328,22 @@ class CodeTool(BaseCodebaseTool):
             except PermissionError:
                 structure.append(f"{prefix}└── [Permission Denied]")
         
-        _walk_dir(dir_path)
-        return "\n".join(structure)
+        try:
+            _walk_dir(dir_path)
+            return "\n".join(structure)
+        except KeyboardInterrupt:
+            raise
     
     def _execute(self, query: str, file_path: Optional[str] = None, max_lines: int = 100, include_context: bool = True, use_ripgrep: bool = True) -> ToolResult:
         """执行代码搜索"""
+        # 在执行开始时检查是否已取消
+        if _cancellation_event.is_set():
+            logger.warning("CodeTool execution cancelled before starting")
+            return ToolResult(
+                success=False,
+                error="Code search was cancelled"
+            )
+        
         try:
             # 打印输入参数
             logger.info("=" * 80)
@@ -316,6 +368,11 @@ class CodeTool(BaseCodebaseTool):
             
             # 如果指定了文件路径，直接读取文件
             if file_path:
+                # 检查是否已取消
+                if _cancellation_event.is_set():
+                    logger.warning("CodeTool execution cancelled before reading file")
+                    raise KeyboardInterrupt("Code search cancelled")
+                
                 full_path = self.repo_path / file_path
                 if full_path.exists():
                     if full_path.is_dir():
@@ -348,6 +405,11 @@ class CodeTool(BaseCodebaseTool):
                     if files:
                         if len(files) == 1:
                             # 单个文件，返回内容
+                            # 检查是否已取消
+                            if _cancellation_event.is_set():
+                                logger.warning("CodeTool execution cancelled before reading single file")
+                                raise KeyboardInterrupt("Code search cancelled")
+                            
                             content = self._read_file_content(files[0], max_lines, include_context)
                             result_text = f"File: {files[0].relative_to(self.repo_path)}\n\n{content}"
                             
@@ -359,6 +421,11 @@ class CodeTool(BaseCodebaseTool):
                             # 多个文件，返回列表和部分内容
                             result_text = f"Found {len(files)} files matching '{query}':\n\n"
                             for file_path in files[:5]:  # 只显示前5个
+                                # 检查是否已取消（在处理每个文件时检查）
+                                if _cancellation_event.is_set():
+                                    logger.warning("CodeTool execution cancelled during file processing")
+                                    raise KeyboardInterrupt("Code search cancelled")
+                                
                                 rel_path = file_path.relative_to(self.repo_path)
                                 preview = self._read_file_content(file_path, 10, False)
                                 result_text += f"{rel_path}:\n{preview}\n---\n"
@@ -372,6 +439,11 @@ class CodeTool(BaseCodebaseTool):
                         if search_results:
                             result_text = f"Found matches in {len(search_results)} files:\n\n"
                             for item in search_results:
+                                # 检查是否已取消（在处理每个结果时检查）
+                                if _cancellation_event.is_set():
+                                    logger.warning("CodeTool execution cancelled during result processing")
+                                    raise KeyboardInterrupt("Code search cancelled")
+                                
                                 result_text += f"{item['file']}:\n"
                                 for match in item['matches']:
                                     result_text += f"  Line {match['line']}: {match['content']}\n"
@@ -407,6 +479,10 @@ class CodeTool(BaseCodebaseTool):
                 summary=summary
             )
         
+        except KeyboardInterrupt:
+            # 任务被取消，重新抛出
+            logger.warning("CodeTool execution interrupted by cancellation")
+            raise
         except Exception as e:
             logger.error(f"Code search error: {str(e)}", exc_info=True)
             return ToolResult(

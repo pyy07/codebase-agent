@@ -288,6 +288,7 @@ class AgentExecutorWrapper:
         self,
         input_text: str,
         context_files: Optional[List[Dict[str, Any]]] = None,
+        plan_steps: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         执行 Agent 分析
@@ -295,6 +296,7 @@ class AgentExecutorWrapper:
         Args:
             input_text: 用户输入
             context_files: 上下文文件列表（可选）
+            plan_steps: 分析计划步骤列表（可选）
         
         Returns:
             执行结果字典
@@ -305,13 +307,34 @@ class AgentExecutorWrapper:
         try:
             logger.info(f"Agent execution started, input length: {len(input_text)}")
             
-            # 构建输入（包含上下文文件信息）
+            # 构建输入（包含上下文文件信息和计划）
+            full_input = input_text
+            
+            # 如果有计划步骤，将其包含在输入中
+            if plan_steps:
+                plan_text = "\n\n## 📋 分析计划（请严格按照此计划执行）\n\n"
+                for step in plan_steps:
+                    step_num = step.get("step", 0)
+                    action = step.get("action", "")
+                    target = step.get("target", "")
+                    if target:
+                        plan_text += f"步骤 {step_num}: {action} - {target}\n"
+                    else:
+                        plan_text += f"步骤 {step_num}: {action}\n"
+                plan_text += "\n**重要提示**：\n"
+                plan_text += "1. 请严格按照上述计划执行，按顺序完成每个步骤\n"
+                plan_text += "2. 每个步骤完成后，继续执行下一步，不要跳过\n"
+                plan_text += "3. 优先使用代码工具（code_search）查找相关代码，因为代码是问题的根源\n"
+                plan_text += "4. 如果某个步骤失败，尝试其他方法，但不要跳过计划中的步骤\n"
+                plan_text += "5. 完成所有步骤后，给出完整的分析结论\n"
+                full_input = f"{input_text}{plan_text}"
+                logger.info(f"Plan steps included in input: {len(plan_steps)} steps")
+            
+            # 添加上下文文件信息
             if context_files:
                 logger.info(f"Processing {len(context_files)} context files")
                 context_info = self._format_context_files(context_files)
-                full_input = f"{input_text}\n\nAdditional Context:\n{context_info}"
-            else:
-                full_input = input_text
+                full_input = f"{full_input}\n\nAdditional Context:\n{context_info}"
             
             logger.info(f"Prepared input, total length: {len(full_input)}")
             

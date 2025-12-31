@@ -67,6 +67,13 @@ class SSECallbackHandler(BaseCallbackHandler):
         """标记任务为已取消"""
         with self._cancelled_lock:
             self._cancelled = True
+        # 同时设置全局取消标志，让工具能够检查
+        try:
+            from codebase_driven_agent.tools.code_tool import _cancellation_event
+            _cancellation_event.set()
+            logger.debug("Global cancellation event set for tools")
+        except Exception as e:
+            logger.debug(f"Failed to set global cancellation event: {e}")
     
     def is_cancelled(self) -> bool:
         """检查任务是否已被取消"""

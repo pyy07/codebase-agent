@@ -44,6 +44,9 @@ class BaseCodebaseTool(BaseTool, ABC):
         try:
             result = self._execute(*args, **kwargs)
             return self._format_result(result)
+        except KeyboardInterrupt:
+            # 任务被取消，重新抛出以便上层处理
+            raise
         except Exception as e:
             return self._format_error(str(e))
     

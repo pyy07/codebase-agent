@@ -97,10 +97,11 @@ async def _generate_analysis_plan(
 ...
 
 要求：
-1. 计划要具体、可执行
-2. 每个步骤对应一个工具调用或分析操作
-3. 步骤要按逻辑顺序排列
-4. 只输出计划，不要执行任何操作
+1. **优先使用代码库分析**：计划中应该优先包含使用代码工具（code_search）查找相关代码的步骤
+2. 计划要具体、可执行，每个步骤对应一个工具调用或分析操作
+3. 步骤要按逻辑顺序排列，建议顺序：代码分析 → 日志查询（如需要）→ 代码定位 → 综合分析
+4. 如果问题涉及错误或异常，必须包含使用代码工具定位错误代码位置的步骤
+5. 只输出计划，不要执行任何操作
 
 分析计划："""
 
@@ -331,15 +332,24 @@ async def _execute_analysis_stream(
             log_query_instance.clear_cache()
             logger.debug("Log query cache cleared for new analysis request")
         
+        # 重置全局取消标志（确保每次新请求开始时都是未取消状态）
+        try:
+            from codebase_driven_agent.tools.code_tool import _cancellation_event
+            _cancellation_event.clear()
+            logger.debug("Global cancellation event cleared for new analysis request")
+        except Exception as e:
+            logger.debug(f"Failed to clear global cancellation event: {e}")
+        
         # 创建 Agent 执行器（带 Callback）
         executor = AgentExecutorWrapper(callbacks=[callback_handler])
         
-        # 启动 Agent 执行
+        # 启动 Agent 执行（传入计划步骤）
         logger.info(f"Starting agent execution for input: {request.input[:100]}...")
         agent_task = asyncio.create_task(
             executor.run(
                 input_text=request.input,
                 context_files=context_files,
+                plan_steps=plan_steps if plan_steps else None,
             )
         )
         # 注册 agent 任务，用于服务器关闭时取消
