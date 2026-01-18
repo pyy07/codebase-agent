@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import ProgressIndicator from '../ProgressIndicator'
+import { ProgressIndicator } from '../ProgressIndicator'
 
 describe('ProgressIndicator', () => {
   it('应该渲染进度消息和百分比', () => {
@@ -24,7 +24,7 @@ describe('ProgressIndicator', () => {
       />
     )
 
-    const progressBar = container.querySelector('.progress-bar')
+    const progressBar = container.querySelector('.progress-bar-fill')
     expect(progressBar).toBeInTheDocument()
     expect(progressBar).toHaveStyle({ width: '75%' })
   })

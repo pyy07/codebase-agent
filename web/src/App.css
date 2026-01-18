@@ -1,50 +1,152 @@
-.app {
-  min-height: 100vh;
+/* ============================================
+   CODEBASE AGENT - Chat App Layout
+   ============================================ */
+
+.chat-app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--background);
+  overflow: hidden;
+}
+
+/* ============================================
+   Header
+   ============================================ */
+.chat-header {
+  flex-shrink: 0;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  padding: 0.75rem 1rem;
+  z-index: 50;
+}
+
+.header-content {
+  max-width: 900px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.logo-icon {
+  width: 36px;
+  height: 36px;
+  background: linear-gradient(135deg, var(--primary) 0%, #8B5CF6 100%);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+}
+
+.logo-text h1 {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--foreground);
+  margin: 0;
+  letter-spacing: -0.02em;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Theme Toggle Button */
+.theme-toggle-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: var(--secondary);
+  border: 1px solid var(--border);
+  color: var(--foreground);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.theme-toggle-btn:hover {
+  background: var(--accent);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+/* ============================================
+   Main Messages Area
+   ============================================ */
+.chat-main {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.messages-container {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem;
+  min-height: 100%;
   display: flex;
   flex-direction: column;
 }
 
-.app-header {
-  background-color: #2c3e50;
-  color: white;
-  padding: 2rem;
-  text-align: center;
-}
-
-.app-header h1 {
-  margin-bottom: 0.5rem;
-  font-size: 2rem;
-}
-
-.app-header p {
-  opacity: 0.9;
-  font-size: 1rem;
-}
-
-.app-main {
-  flex: 1;
-  max-width: 1200px;
-  width: 100%;
-  margin: 0 auto;
-  padding: 2rem;
-}
-
-.error-message {
-  background-color: #fee;
-  border: 1px solid #fcc;
-  color: #c33;
+/* ============================================
+   Footer Input Area
+   ============================================ */
+.chat-footer {
+  flex-shrink: 0;
+  background: var(--card);
+  border-top: 1px solid var(--border);
   padding: 1rem;
-  border-radius: 4px;
-  margin: 1rem 0;
 }
 
+/* ============================================
+   Responsive
+   ============================================ */
 @media (max-width: 768px) {
-  .app-main {
-    padding: 1rem;
+  .chat-header {
+    padding: 0.625rem 0.75rem;
   }
   
-  .app-header h1 {
-    font-size: 1.5rem;
+  .logo-text h1 {
+    font-size: 0.9rem;
+  }
+  
+  .messages-container {
+    padding: 1rem 0.75rem;
+  }
+  
+  .chat-footer {
+    padding: 0.75rem;
   }
 }
 
+/* ============================================
+   Scrollbar Styling
+   ============================================ */
+.chat-main::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-main::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-main::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+.chat-main::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+}

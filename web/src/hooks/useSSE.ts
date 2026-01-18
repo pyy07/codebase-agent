@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { PlanStep } from '../types'
 
 export interface SSEMessage {
   event: string
@@ -10,13 +11,12 @@ export interface UseSSEOptions {
   onResult?: (result: any) => void
   onError?: (error: string) => void
   onDone?: () => void
-  onPlan?: (steps: Array<{step: number, action: string, target: string, status: string}>) => void
+  onPlan?: (steps: PlanStep[]) => void
 }
 
 export function useSSE(url: string, body: any, options: UseSSEOptions = {}) {
   const [isConnected, setIsConnected] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const eventSourceRef = useRef<EventSource | null>(null)
   const controllerRef = useRef<AbortController | null>(null)
   const bodyStringRef = useRef<string | null>(null)
   const connectionIdRef = useRef<number>(0) // 用于跟踪连接ID，确保每次都是新连接

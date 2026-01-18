@@ -1,91 +1,123 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react'
-import AnalysisForm from './components/AnalysisForm'
-import AnalysisResult from './components/AnalysisResult'
-import ProgressIndicator from './components/ProgressIndicator'
-import { AnalysisResult as AnalysisResultType } from './types'
+import { useState, useCallback, useRef, useEffect } from 'react'
+import { Terminal } from 'lucide-react'
+import { ThemeProvider } from './components/theme-provider'
+import { ThemeToggle } from './components/theme-toggle'
+import MessageList from './components/MessageList'
+import ChatInput from './components/ChatInput'
+import { ChatMessage, MessageContent, PlanStep, AttachedFile, AnalysisResult } from './types'
 import { useSSE } from './hooks/useSSE'
 import './App.css'
 
+function generateId() {
+  return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+}
+
 function App() {
-  const [result, setResult] = useState<AnalysisResultType | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [progress, setProgress] = useState<{ message: string; progress: number; step?: string } | null>(null)
-  const [planSteps, setPlanSteps] = useState<Array<{step: number, action: string, target: string, status: string}>>([])
-  const [useStreaming, setUseStreaming] = useState(true)
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [isProcessing, setIsProcessing] = useState(false)
   const [sseBody, setSseBody] = useState<any>(null)
-  const timeoutTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const [useStreaming, setUseStreaming] = useState(true)
+  const currentAssistantMessageRef = useRef<string | null>(null)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // 使用 useCallback 稳定回调函数，避免 useSSE 的 useEffect 重复执行
+  // Auto scroll to bottom when new messages arrive
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [])
+
+  useEffect(() => {
+    scrollToBottom()
+  }, [messages, scrollToBottom])
+
+  // Helper to update the current assistant message
+  const updateAssistantMessage = useCallback((updater: (contents: MessageContent[]) => MessageContent[]) => {
+    const messageId = currentAssistantMessageRef.current
+    if (!messageId) return
+    
+    setMessages(prev => prev.map(msg => {
+      if (msg.id === messageId) {
+        return { ...msg, content: updater(msg.content) }
+      }
+      return msg
+    }))
+  }, [])
+
+  // SSE Handlers
   const handleProgress = useCallback((message: string, progress: number, step?: string) => {
-    console.log('handleProgress called:', { message, progress, step, progressType: typeof progress })
-    // 确保 progress 是数字类型
-    const progressValue = typeof progress === 'number' ? progress : parseFloat(String(progress)) || 0
-    console.log('Setting progress state:', { message, progress: progressValue, step })
-    setProgress({ message, progress: progressValue, step })
-    // 清除超时定时器（收到进度更新）
-    if (timeoutTimerRef.current) {
-      clearTimeout(timeoutTimerRef.current)
-      timeoutTimerRef.current = null
-    }
-    // 设置新的超时定时器（30秒无响应则提示）
-    timeoutTimerRef.current = setTimeout(() => {
-      setError('分析时间较长，请耐心等待...如果长时间无响应，请检查网络连接或重试。')
-    }, 30000)
-  }, [])
+    updateAssistantMessage(contents => {
+      // Update or add progress content
+      const hasProgress = contents.some(c => c.type === 'progress')
+      if (hasProgress) {
+        return contents.map(c => 
+          c.type === 'progress' 
+            ? { type: 'progress' as const, data: { message, progress, step } }
+            : c
+        )
+      }
+      return [...contents, { type: 'progress' as const, data: { message, progress, step } }]
+    })
+  }, [updateAssistantMessage])
 
-  const handleResult = useCallback((resultData: any) => {
-    setResult(resultData)
-    setLoading(false)
-    setProgress(null)
-    if (timeoutTimerRef.current) {
-      clearTimeout(timeoutTimerRef.current)
-      timeoutTimerRef.current = null
+  const handlePlan = useCallback((steps: PlanStep[]) => {
+    updateAssistantMessage(contents => {
+      const hasPlan = contents.some(c => c.type === 'plan')
+      if (hasPlan) {
+        return contents.map(c => 
+          c.type === 'plan' ? { type: 'plan' as const, data: steps } : c
+        )
+      }
+      // Remove progress when plan arrives, add plan
+      return [...contents.filter(c => c.type !== 'progress'), { type: 'plan' as const, data: steps }]
+    })
+  }, [updateAssistantMessage])
+
+  const handleResult = useCallback((result: AnalysisResult) => {
+    updateAssistantMessage(contents => {
+      return [
+        ...contents.filter(c => c.type !== 'progress'),
+        { type: 'result' as const, data: result }
+      ]
+    })
+    setIsProcessing(false)
+    
+    // Mark message as not streaming anymore
+    const messageId = currentAssistantMessageRef.current
+    if (messageId) {
+      setMessages(prev => prev.map(msg => 
+        msg.id === messageId ? { ...msg, isStreaming: false } : msg
+      ))
     }
-  }, [])
+  }, [updateAssistantMessage])
 
   const handleError = useCallback((errorMsg: string) => {
-    console.log('handleError called:', errorMsg)
-    setError(errorMsg)
-    setLoading(false)
-    setProgress(null)
-    // 注意：不清空 sseBody 和 useStreaming，让 useSSE 自己处理清理
-    // 这样可以在错误后重新连接
-    if (timeoutTimerRef.current) {
-      clearTimeout(timeoutTimerRef.current)
-      timeoutTimerRef.current = null
+    updateAssistantMessage(contents => {
+      return [
+        ...contents.filter(c => c.type !== 'progress'),
+        { type: 'error' as const, data: errorMsg }
+      ]
+    })
+    setIsProcessing(false)
+    
+    const messageId = currentAssistantMessageRef.current
+    if (messageId) {
+      setMessages(prev => prev.map(msg => 
+        msg.id === messageId ? { ...msg, isStreaming: false } : msg
+      ))
     }
-  }, [])
+  }, [updateAssistantMessage])
 
   const handleDone = useCallback(() => {
-    console.log('handleDone called - analysis completed')
-    // 注意：不要在这里清空 progress，因为可能还有结果要显示
-    // 只有在收到 result 时才清空 progress
-    setLoading(false)
-    // 不清空 progress，让用户看到最终状态
-    // setProgress(null)
-    if (timeoutTimerRef.current) {
-      clearTimeout(timeoutTimerRef.current)
-      timeoutTimerRef.current = null
+    setIsProcessing(false)
+    const messageId = currentAssistantMessageRef.current
+    if (messageId) {
+      setMessages(prev => prev.map(msg => 
+        msg.id === messageId ? { ...msg, isStreaming: false } : msg
+      ))
     }
   }, [])
 
-  const handlePlan = useCallback((steps: Array<{step: number, action: string, target: string, status: string}>) => {
-    console.log('handlePlan called:', steps)
-    setPlanSteps(steps)
-  }, [])
-
-  // 清理超时定时器
-  useEffect(() => {
-    return () => {
-      if (timeoutTimerRef.current) {
-        clearTimeout(timeoutTimerRef.current)
-      }
-    }
-  }, [])
-
-  // SSE 流式处理
-  const { isConnected: sseConnected, error: sseError } = useSSE(
+  // SSE Hook
+  const { error: sseError } = useSSE(
     useStreaming && sseBody ? '/api/v1/analyze/stream' : '',
     sseBody,
     {
@@ -97,141 +129,109 @@ function App() {
     }
   )
 
-  const handleAnalysis = async (input: string, contextFiles: File[], streaming: boolean = true) => {
-    console.log('handleAnalysis called:', { input, contextFiles: contextFiles.length, streaming })
-    
-    // 先清空之前的状态，确保可以重新发起请求
-    setError(null)
-    setResult(null)
-    setProgress(null)
-    setPlanSteps([])
-    
-    // 清除之前的超时定时器
-    if (timeoutTimerRef.current) {
-      clearTimeout(timeoutTimerRef.current)
-      timeoutTimerRef.current = null
+  // Handle SSE errors
+  useEffect(() => {
+    if (sseError) {
+      handleError(sseError)
     }
+  }, [sseError, handleError])
+
+  // Send message handler
+  const handleSendMessage = useCallback(async (text: string, files: AttachedFile[]) => {
+    // Create user message
+    const userMessageContent: MessageContent[] = [{ type: 'text', data: text }]
     
-    // 设置加载状态和初始进度
-    setLoading(true)
-    setProgress({ message: '准备开始分析...', progress: 0, step: 'preparing' })
-
-    try {
-      // 处理上下文文件
-      const contextFilesData: any[] = []
-      for (const file of contextFiles) {
-        const content = await file.text()
-        const type = file.name.endsWith('.log') || file.name.endsWith('.txt') ? 'log' : 'code'
-        contextFilesData.push({
-          type,
-          path: file.name,
-          content,
-        })
-      }
-
-      // 构建请求体
-      const requestBody: any = {
-        input,
-      }
-      
-      if (contextFilesData.length > 0) {
-        requestBody.context_files = contextFilesData
-      }
-
-      if (streaming) {
-        // 使用 SSE 流式接口
-        // 先重置流式状态，然后设置 sseBody
-        // 使用双 requestAnimationFrame 确保状态重置完成后再设置新值
-        setUseStreaming(false)
-        setSseBody(null)
-        
-        // 使用双 requestAnimationFrame 确保状态重置完成后再设置新值
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            console.log('Setting SSE body:', requestBody)
-            setUseStreaming(true)
-            setSseBody(requestBody)
-          })
-        })
-        return
-      }
-
-      // 使用同步接口
-      setUseStreaming(false)
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-      }
-      
-      const apiKey = localStorage.getItem('apiKey')
-      if (apiKey) {
-        headers['X-API-Key'] = apiKey
-      }
-
-      const response = await fetch('/api/v1/analyze', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(requestBody),
+    // Add file references to user message
+    if (files.length > 0) {
+      files.forEach(file => {
+        if (file.type === 'image' && file.preview) {
+          userMessageContent.push({ type: 'text', data: { type: 'image', name: file.name, preview: file.preview } })
+        }
       })
-
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.detail || '分析失败')
-      }
-
-      const data = await response.json()
-      setResult(data.result)
-      setLoading(false)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '未知错误')
-      setLoading(false)
     }
-  }
+
+    const userMessage: ChatMessage = {
+      id: generateId(),
+      role: 'user',
+      content: userMessageContent,
+      timestamp: new Date(),
+    }
+
+    // Create assistant message placeholder
+    const assistantMessage: ChatMessage = {
+      id: generateId(),
+      role: 'assistant',
+      content: [{ type: 'thinking', data: '正在分析你的问题...' }],
+      timestamp: new Date(),
+      isStreaming: true,
+    }
+
+    currentAssistantMessageRef.current = assistantMessage.id
+    setMessages(prev => [...prev, userMessage, assistantMessage])
+    setIsProcessing(true)
+
+    // Prepare request
+    const contextFilesData = files.map(file => ({
+      type: file.type,
+      path: file.name,
+      content: file.content,
+    }))
+
+    const requestBody: any = { input: text }
+    if (contextFilesData.length > 0) {
+      requestBody.context_files = contextFilesData
+    }
+
+    // Use streaming
+    setUseStreaming(false)
+    setSseBody(null)
+    
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setUseStreaming(true)
+        setSseBody(requestBody)
+      })
+    })
+  }, [])
 
   return (
-    <div className="app">
-      <header className="app-header">
-        <h1>Codebase Driven Agent</h1>
-        <p>基于代码库驱动的智能问题分析平台</p>
-      </header>
-      
-      <main className="app-main">
-        <AnalysisForm onSubmit={handleAnalysis} loading={loading || sseConnected} />
-        
-        {(sseError || error) && (
-          <div className="error-message">
-            <strong>错误：</strong>{sseError || error}
+    <ThemeProvider>
+      <div className="chat-app">
+        {/* Header */}
+        <header className="chat-header">
+          <div className="header-content">
+            <div className="logo">
+              <div className="logo-icon">
+                <Terminal size={18} />
+              </div>
+              <div className="logo-text">
+                <h1>Codebase Agent</h1>
+              </div>
+            </div>
+            <div className="header-actions">
+              <ThemeToggle />
+            </div>
           </div>
-        )}
-        
-        {planSteps.length > 0 && (
-          <div className="plan-steps" style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
-            <h3 style={{ marginTop: 0, marginBottom: '10px' }}>分析计划</h3>
-            <ol style={{ margin: 0, paddingLeft: '20px' }}>
-              {planSteps.map((step, index) => (
-                <li key={index} style={{ 
-                  marginBottom: '8px',
-                  color: step.status === 'completed' ? '#28a745' : 
-                         step.status === 'running' ? '#007bff' : 
-                         step.status === 'failed' ? '#dc3545' : '#666'
-                }}>
-                  <strong>步骤 {step.step}:</strong> {step.action}
-                  {step.target && <span> - {step.target}</span>}
-                  {step.status === 'completed' && <span> ✓</span>}
-                  {step.status === 'running' && <span> ⟳</span>}
-                  {step.status === 'failed' && <span> ✗</span>}
-                </li>
-              ))}
-            </ol>
+        </header>
+
+        {/* Messages Area */}
+        <main className="chat-main">
+          <div className="messages-container">
+            <MessageList messages={messages} />
+            <div ref={messagesEndRef} />
           </div>
-        )}
-        
-        {progress && <ProgressIndicator {...progress} />}
-        
-        {result && <AnalysisResult result={result} />}
-      </main>
-    </div>
+        </main>
+
+        {/* Input Area */}
+        <footer className="chat-footer">
+          <ChatInput 
+            onSend={handleSendMessage} 
+            disabled={isProcessing} 
+          />
+        </footer>
+      </div>
+    </ThemeProvider>
   )
 }
 
 export default App
-

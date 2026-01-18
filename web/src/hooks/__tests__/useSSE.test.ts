@@ -72,7 +72,8 @@ describe('useSSE', () => {
     })
 
     const callArgs = vi.mocked(fetch).mock.calls[0]
-    expect(callArgs[1]?.headers?.['X-API-Key']).toBe('test-key')
+    const headers = callArgs[1]?.headers as Record<string, string> | undefined
+    expect(headers?.['X-API-Key']).toBe('test-key')
   })
 
   it('应该在响应错误时调用 onError', async () => {
