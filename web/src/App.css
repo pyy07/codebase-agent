@@ -61,6 +61,41 @@
   gap: 0.5rem;
 }
 
+.screenshot-button {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: var(--primary);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.screenshot-button:hover:not(:disabled) {
+  opacity: 0.9;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+}
+
+.screenshot-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.screenshot-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.screenshot-button svg {
+  width: 16px;
+  height: 16px;
+}
+
 /* Theme Toggle Button */
 .theme-toggle-btn {
   width: 36px;

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { PlanStep } from '../types'
+import { PlanStep, StepExecutionData } from '../types'
 
 export interface SSEMessage {
   event: string
@@ -12,6 +12,7 @@ export interface UseSSEOptions {
   onError?: (error: string) => void
   onDone?: () => void
   onPlan?: (steps: PlanStep[]) => void
+  onStepExecution?: (stepExecution: StepExecutionData) => void
 }
 
 export function useSSE(url: string, body: any, options: UseSSEOptions = {}) {
@@ -134,13 +135,33 @@ export function useSSE(url: string, body: any, options: UseSSEOptions = {}) {
               try {
                 const data = JSON.parse(dataStr)
                 
-                console.log('SSE message parsed:', { event: currentEvent, data })
+                console.log('SSE message parsed:', { 
+                  event: currentEvent, 
+                  data, 
+                  dataType: typeof data,
+                  hasSteps: 'steps' in data,
+                  stepsLength: data.steps ? data.steps.length : 'N/A'
+                })
 
                 // 根据 event 类型或数据内容处理消息
                 if (currentEvent === 'plan' || data.steps) {
                   // Plan 消息（分析计划）
-                  console.log('Plan received:', { steps: data.steps })
+                  console.log('Plan received:', { event: currentEvent, steps: data.steps, fullData: data })
                   options.onPlan?.(data.steps || [])
+                } else if (currentEvent === 'step_execution' || (data.step && (data.status === 'completed' || data.status === 'failed'))) {
+                  // Step execution 消息（步骤执行结果）
+                  console.log('Step execution received:', data)
+                  const stepExecution: StepExecutionData = {
+                    step: data.step,
+                    action: data.action,
+                    target: data.target,
+                    status: data.status,
+                    result: data.result,
+                    result_truncated: data.result_truncated,
+                    error: data.error,
+                    timestamp: new Date(),
+                  }
+                  options.onStepExecution?.(stepExecution)
                 } else if (currentEvent === 'progress' || (data.message && data.progress !== undefined)) {
                   // Progress 消息
                   console.log('Progress update:', { 
@@ -192,8 +213,13 @@ export function useSSE(url: string, body: any, options: UseSSEOptions = {}) {
           for (const line of lines) {
             const trimmedLine = line.trim()
             
-            // 调试：打印每一行
-            if (trimmedLine && (trimmedLine.includes('event:') || trimmedLine.includes('data:'))) {
+            // 跳过空行和注释行（以 : 开头的行是 SSE 注释，用于心跳）
+            if (!trimmedLine || trimmedLine.startsWith(':')) {
+              continue
+            }
+            
+            // 调试：打印每一行（包括 plan 相关的）
+            if (trimmedLine && (trimmedLine.includes('event:') || trimmedLine.includes('data:') || trimmedLine.includes('plan') || trimmedLine.includes('steps'))) {
               console.log('SSE raw line:', trimmedLine)
             }
             

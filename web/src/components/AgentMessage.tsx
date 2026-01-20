@@ -44,6 +44,8 @@ function ContentBlock({ content, isStreaming }: { content: MessageContent; isStr
       return <ProgressBlock data={content.data} />
     case 'plan':
       return <PlanBlock steps={content.data} />
+    case 'step_execution':
+      return <StepExecutionBlock steps={content.data} />
     case 'tool_call':
       return <ToolCallBlock data={content.data} />
     case 'result':
@@ -137,6 +139,134 @@ function PlanBlock({ steps }: { steps: PlanStep[] }) {
   )
 }
 
+// Step Execution Block - 显示实时步骤执行状态
+function StepExecutionBlock({ steps }: { steps: any[] }) {
+  const [expanded, setExpanded] = useState(true)
+  const [expandedResults, setExpandedResults] = useState<Set<number>>(new Set())
+  const completedCount = steps.filter(s => s.status === 'completed').length
+  const runningStep = steps.find(s => s.status === 'running')
+  
+  const toggleResult = (stepNumber: number) => {
+    setExpandedResults(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(stepNumber)) {
+        newSet.delete(stepNumber)
+      } else {
+        newSet.add(stepNumber)
+      }
+      return newSet
+    })
+  }
+  
+  return (
+    <div className="content-block step-execution-block">
+      <button className="block-header clickable" onClick={() => setExpanded(!expanded)}>
+        <Wrench size={16} className="block-icon tool" />
+        <span>执行步骤</span>
+        {runningStep && (
+          <Badge variant="outline" className="running-badge">
+            正在执行: 步骤 {runningStep.step}
+          </Badge>
+        )}
+        <Badge variant="outline" className="progress-badge">
+          {completedCount}/{steps.length}
+        </Badge>
+        {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+      </button>
+      {expanded && (
+        <div className="block-body">
+          <div className="step-execution-list">
+            {steps.map((step, index) => (
+              <div key={index} className={`execution-step step-${step.status}`}>
+                <div className="execution-step-header">
+                  <div className="execution-step-status">
+                    {step.status === 'completed' && <CheckCircle2 size={18} className="completed" />}
+                    {step.status === 'running' && <Loader2 size={18} className="running spinning" />}
+                    {step.status === 'failed' && <XCircle size={18} className="failed" />}
+                    {step.status === 'pending' && <Circle size={18} className="pending" />}
+                  </div>
+                  <div className="execution-step-info">
+                    <div className="execution-step-title">
+                      <span className="step-number">步骤 {step.step}</span>
+                      <span className="step-action">{step.action}</span>
+                    </div>
+                    {step.target && (
+                      <div className="execution-step-target">
+                        <code>{step.target}</code>
+                      </div>
+                    )}
+                  </div>
+                  <div className="execution-step-badge">
+                    <Badge 
+                      variant="outline" 
+                      className={`status-badge ${step.status}`}
+                    >
+                      {step.status === 'completed' && '已完成'}
+                      {step.status === 'running' && '执行中'}
+                      {step.status === 'failed' && '失败'}
+                      {step.status === 'pending' && '等待中'}
+                    </Badge>
+                  </div>
+                </div>
+                {(step.result || step.error) && (
+                  <div className="execution-step-result-container">
+                    {step.result && (
+                      <div className="execution-step-result">
+                        <button 
+                          className="result-toggle-button"
+                          onClick={() => toggleResult(step.step)}
+                        >
+                          {expandedResults.has(step.step) ? (
+                            <ChevronDown size={14} />
+                          ) : (
+                            <ChevronRight size={14} />
+                          )}
+                          <span className="result-label">执行结果</span>
+                          {step.result_truncated && (
+                            <Badge variant="outline" className="truncated-badge">已截断</Badge>
+                          )}
+                        </button>
+                        {expandedResults.has(step.step) && (
+                          <pre className="result-content">{step.result}</pre>
+                        )}
+                        {!expandedResults.has(step.step) && (
+                          <pre className="result-content preview">{step.result.substring(0, 200)}{step.result.length > 200 ? '...' : ''}</pre>
+                        )}
+                      </div>
+                    )}
+                    {step.error && (
+                      <div className="execution-step-error">
+                        <button 
+                          className="result-toggle-button"
+                          onClick={() => toggleResult(step.step)}
+                        >
+                          {expandedResults.has(step.step) ? (
+                            <ChevronDown size={14} />
+                          ) : (
+                            <ChevronRight size={14} />
+                          )}
+                          <AlertTriangle size={14} />
+                          <span className="result-label">错误信息</span>
+                        </button>
+                        {expandedResults.has(step.step) && (
+                          <pre className="error-content">{step.error}</pre>
+                        )}
+                        {!expandedResults.has(step.step) && (
+                          <pre className="error-content preview">{step.error.substring(0, 200)}{step.error.length > 200 ? '...' : ''}</pre>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // Tool Call Block
 function ToolCallBlock({ data }: { data: any }) {
   const [expanded, setExpanded] = useState(false)
@@ -170,9 +300,138 @@ function ToolCallBlock({ data }: { data: any }) {
 }
 
 // Result Block
-function ResultBlock({ result }: { result: AnalysisResult }) {
+function ResultBlock({ result: rawResult }: { result: any }) {
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null)
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['root-cause']))
+  const [showRaw, setShowRaw] = useState(false)
+
+  // 解析结果数据，支持多种格式
+  const parseResult = (data: any): AnalysisResult | null => {
+    if (!data) return null
+    
+    // 辅助函数：尝试从字符串中提取 JSON
+    const extractJson = (str: string): any => {
+      if (!str || typeof str !== 'string') return null
+      
+      // 尝试直接解析
+      try {
+        return JSON.parse(str)
+      } catch {
+        // 继续尝试其他方式
+      }
+      
+      // 尝试从 ```json ``` 代码块中提取（使用贪婪匹配）
+      const jsonCodeBlockMatch = str.match(/```json\s*([\s\S]+)\s*```/)
+      if (jsonCodeBlockMatch) {
+        const jsonContent = jsonCodeBlockMatch[1].trim()
+        try {
+          return JSON.parse(jsonContent)
+        } catch {
+          // JSON 可能格式不对，尝试提取 {} 部分
+          const firstBrace = jsonContent.indexOf('{')
+          const lastBrace = jsonContent.lastIndexOf('}')
+          if (firstBrace !== -1 && lastBrace > firstBrace) {
+            try {
+              return JSON.parse(jsonContent.substring(firstBrace, lastBrace + 1))
+            } catch {}
+          }
+        }
+      }
+      
+      // 尝试从 ``` ``` 代码块中提取
+      const codeBlockMatch = str.match(/```\s*([\s\S]+)\s*```/)
+      if (codeBlockMatch) {
+        const content = codeBlockMatch[1].trim()
+        try {
+          return JSON.parse(content)
+        } catch {}
+      }
+      
+      // 尝试找到 { 和 } 之间的内容
+      const firstBrace = str.indexOf('{')
+      const lastBrace = str.lastIndexOf('}')
+      if (firstBrace !== -1 && lastBrace > firstBrace) {
+        try {
+          return JSON.parse(str.substring(firstBrace, lastBrace + 1))
+        } catch {}
+      }
+      
+      return null
+    }
+    
+    // 如果是字符串，尝试解析JSON
+    if (typeof data === 'string') {
+      const parsed = extractJson(data)
+      if (parsed) {
+        data = parsed
+      } else {
+        // 如果解析失败，可能是纯文本，作为 root_cause 返回
+        return {
+          root_cause: data,
+          suggestions: [],
+          confidence: 0.5
+        }
+      }
+    }
+    
+    // 检查是否有嵌套的 result 字段
+    if (data.result && typeof data.result === 'object') {
+      data = data.result
+    }
+    
+    // 如果 root_cause 看起来像包含 JSON 代码块或嵌套 JSON
+    if (typeof data.root_cause === 'string') {
+      const rootCause = data.root_cause.trim()
+      console.log('[parseResult] Checking root_cause:', rootCause.substring(0, 100))
+      
+      // 检查是否以 ```json 开头（说明是 LLM 返回的代码块格式）
+      if (rootCause.startsWith('```json') || rootCause.startsWith('```')) {
+        console.log('[parseResult] root_cause starts with code block, extracting...')
+        // 直接提取代码块内容
+        let content = rootCause
+        // 移除开头的 ```json 或 ```
+        content = content.replace(/^```json\s*\n?/, '').replace(/^```\s*\n?/, '')
+        // 移除结尾的 ```
+        content = content.replace(/\n?```\s*$/, '')
+        console.log('[parseResult] Extracted content:', content.substring(0, 100))
+        
+        try {
+          const parsed = JSON.parse(content)
+          if (parsed && parsed.root_cause !== undefined) {
+            console.log('[parseResult] Successfully parsed nested JSON:', parsed.root_cause?.substring(0, 50))
+            data = parsed
+          }
+        } catch (e) {
+          console.log('[parseResult] Failed to parse extracted content:', e)
+        }
+      } else if (rootCause.includes('"root_cause"')) {
+        // 可能是直接嵌套的 JSON
+        const parsed = extractJson(rootCause)
+        if (parsed && (parsed.root_cause !== undefined || parsed.suggestions)) {
+          console.log('[parseResult] Extracted nested JSON from root_cause')
+          data = parsed
+        }
+      }
+    }
+    
+    // 验证必要字段
+    if (typeof data.root_cause === 'string' || Array.isArray(data.suggestions)) {
+      const result = {
+        root_cause: data.root_cause || '',
+        suggestions: Array.isArray(data.suggestions) ? data.suggestions : [],
+        confidence: typeof data.confidence === 'number' ? data.confidence : 0.5,
+        related_code: data.related_code,
+        related_logs: data.related_logs,
+        related_data: data.related_data
+      }
+      console.log('[parseResult] Final parsed result:', result)
+      return result
+    }
+    
+    return null
+  }
+
+  const result = parseResult(rawResult)
 
   const toggleSection = (section: string) => {
     setExpandedSections(prev => {
@@ -194,6 +453,23 @@ function ResultBlock({ result }: { result: AnalysisResult }) {
     } catch (err) {
       console.error('Failed to copy:', err)
     }
+  }
+
+  // 无法解析时显示原始数据
+  if (!result) {
+    return (
+      <div className="content-block result-block">
+        <div className="result-header">
+          <div className="result-title">
+            <AlertTriangle size={18} className="result-icon" />
+            <span>分析结果</span>
+          </div>
+        </div>
+        <div className="section-content">
+          <pre className="raw-result">{JSON.stringify(rawResult, null, 2)}</pre>
+        </div>
+      </div>
+    )
   }
 
   const confidenceLevel = result.confidence >= 0.8 ? 'high' : result.confidence >= 0.5 ? 'medium' : 'low'
@@ -233,7 +509,7 @@ function ResultBlock({ result }: { result: AnalysisResult }) {
       </div>
 
       {/* Suggestions Section */}
-      {result.suggestions.length > 0 && (
+      {result.suggestions && result.suggestions.length > 0 && (
         <div className="result-section">
           <button 
             className="section-header" 
@@ -324,6 +600,23 @@ function ResultBlock({ result }: { result: AnalysisResult }) {
           )}
         </div>
       )}
+
+      {/* Raw Data Toggle (for debugging) */}
+      <div className="result-section raw-section">
+        <button 
+          className="section-header raw-toggle" 
+          onClick={() => setShowRaw(!showRaw)}
+        >
+          <FileCode size={16} className="section-icon" />
+          <span>原始数据</span>
+          {showRaw ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </button>
+        {showRaw && (
+          <div className="section-content">
+            <pre className="raw-result">{JSON.stringify(rawResult, null, 2)}</pre>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

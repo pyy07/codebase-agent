@@ -46,6 +46,7 @@ export type MessageContentType =
   | 'tool_call'      // Tool being called
   | 'tool_result'    // Tool execution result
   | 'progress'       // Progress update
+  | 'step_execution' // Step execution details
   | 'result'         // Final analysis result
   | 'error'          // Error message
 
@@ -68,6 +69,17 @@ export interface ToolCallData {
   status: 'pending' | 'running' | 'completed' | 'failed'
   output?: string
   duration?: number
+}
+
+export interface StepExecutionData {
+  step: number
+  action: string
+  target?: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  result?: string
+  result_truncated?: boolean
+  error?: string
+  timestamp?: Date
 }
 
 export interface AttachedFile {

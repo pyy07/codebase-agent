@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import queue
 from typing import TypedDict, Annotated, Sequence, Dict, Any, Optional, List, AsyncGenerator
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -38,11 +39,13 @@ class GraphExecutor:
     4. 完整的步骤追踪和状态管理
     """
 
-    def __init__(self, callbacks=None):
+    def __init__(self, callbacks=None, message_queue: Optional[queue.Queue] = None, event_loop: Optional[asyncio.AbstractEventLoop] = None):
         self.llm = create_llm()
         self.tools = get_tools()
         self.callbacks = callbacks or []
         self.tool_node = ToolNode(self.tools)
+        self.message_queue = message_queue  # 使用线程安全的 queue.Queue
+        self.event_loop = event_loop  # 保存事件循环引用
         self.graph = self._build_graph()
 
     def _build_graph(self) -> StateGraph:
@@ -109,6 +112,12 @@ class GraphExecutor:
         from langchain_core.messages import HumanMessage, AIMessage
 
         messages.append(HumanMessage(content=plan_prompt))
+        
+        # 检查消息长度，如果超长则直接结束分析
+        is_too_long, total_length = self._check_messages_length(messages, max_total_length=120000)
+        if is_too_long:
+            logger.warning(f"Plan node: Messages too long ({total_length} chars), forcing synthesize")
+            return {"should_continue": False}
 
         response = self.llm.invoke(messages)
         messages.append(AIMessage(content=response.content))
@@ -124,6 +133,15 @@ class GraphExecutor:
             plan_steps = state["plan_steps"][:current_step] + new_plan
 
         logger.info(f"Plan node: Generated {len(plan_steps)} steps")
+
+        # 立即通过消息队列发送 plan 消息（使用线程安全的 queue.Queue）
+        if self.message_queue:
+            try:
+                # queue.Queue 是线程安全的，可以直接从任何线程 put
+                self.message_queue.put_nowait({"event": "plan", "data": {"steps": plan_steps}})
+                logger.info(f"Plan message queued: {len(plan_steps)} steps")
+            except Exception as e:
+                logger.error(f"Failed to queue plan message: {e}", exc_info=True)
 
         return {
             "plan_steps": plan_steps,
@@ -169,21 +187,78 @@ class GraphExecutor:
 
             logger.info(f"Execute step node: Step {current_step + 1} completed")
 
+            # 立即通过消息队列发送进度更新和步骤执行结果
+            if self.message_queue:
+                try:
+                    total_steps = len(plan_steps)
+                    progress_msg = {
+                        "event": "progress",
+                        "data": {
+                            "message": f"执行步骤 {current_step + 1}/{total_steps}",
+                            "progress": (current_step + 1) / total_steps if total_steps > 0 else 0.5,
+                            "step": "graph_execution",
+                        }
+                    }
+                    # queue.Queue 是线程安全的
+                    self.message_queue.put_nowait(progress_msg)
+                    logger.info(f"Progress message queued: step {current_step + 1}/{total_steps}")
+                    
+                    # 发送步骤执行结果
+                    step_execution_msg = {
+                        "event": "step_execution",
+                        "data": {
+                            "step": current_step + 1,
+                            "action": step.get("action"),
+                            "target": step.get("target"),
+                            "status": "completed",
+                            "result": tool_result[:5000] if len(tool_result) > 5000 else tool_result,  # 限制结果长度
+                            "result_truncated": len(tool_result) > 5000,
+                        }
+                    }
+                    self.message_queue.put_nowait(step_execution_msg)
+                    logger.info(f"Step execution result queued: step {current_step + 1}")
+                except Exception as e:
+                    logger.error(f"Failed to queue progress/step_execution message: {e}", exc_info=True)
+
             return {
                 "step_results": state["step_results"] + [step_result],
                 "current_step": current_step + 1,
             }
         except Exception as e:
-            logger.error(f"Execute step node: Step {current_step + 1} failed: {str(e)}")
+            error_msg = str(e)
+            logger.error(f"Execute step node: Step {current_step + 1} failed: {error_msg}", exc_info=True)
 
-            # 保存失败结果
+            # 保存失败结果（包含详细的错误信息，让 AI 能够分析失败原因）
             step_result = {
                 "step": current_step,
                 "action": step.get("action"),
                 "target": step.get("target"),
                 "status": "failed",
-                "error": str(e),
+                "error": error_msg,
+                "tool_name": tool_name,  # 记录使用的工具名称
+                "tool_input": str(tool_input)[:200] if tool_input else None,  # 记录工具输入（截断）
             }
+
+            # 即使工具调用失败，也继续执行流程，让 AI 决策下一步
+            logger.info(f"Execute step node: Step {current_step + 1} failed, but continuing to decision node")
+            
+            # 发送失败步骤的执行结果
+            if self.message_queue:
+                try:
+                    step_execution_msg = {
+                        "event": "step_execution",
+                        "data": {
+                            "step": current_step + 1,
+                            "action": step.get("action"),
+                            "target": step.get("target"),
+                            "status": "failed",
+                            "error": error_msg[:1000] if len(error_msg) > 1000 else error_msg,  # 限制错误信息长度
+                        }
+                    }
+                    self.message_queue.put_nowait(step_execution_msg)
+                    logger.info(f"Failed step execution result queued: step {current_step + 1}")
+                except Exception as e:
+                    logger.error(f"Failed to queue failed step_execution message: {e}", exc_info=True)
 
             return {
                 "step_results": state["step_results"] + [step_result],
@@ -191,41 +266,22 @@ class GraphExecutor:
             }
 
     def _decision_node(self, state: AgentState) -> Dict[str, Any]:
-        """决策节点：判断是否继续执行、调整计划或结束
-
-        基于以下因素做决策：
-        1. 最后一步的执行结果
-        2. 已有的所有步骤结果
-        3. 是否已经有足够的信息解决问题
-        4. 是否达到了最大迭代次数
+        """决策节点：基于 LLM 判断是否继续、添加新步骤或结束分析
+        
+        核心自适应逻辑：
+        1. 评估已有的步骤结果
+        2. 询问 LLM：信息是否足够？还是需要继续？
+        3. 如果需要继续，LLM 决定下一步
+        4. 动态扩展 plan，返回新步骤
         """
         step_results = state["step_results"]
         plan_steps = state["plan_steps"]
         current_step = state["current_step"]
+        original_input = state["original_input"]
 
         logger.info(
             f"Decision node: current_step={current_step}/{len(plan_steps)}, results={len(step_results)}"
         )
-
-        # 如果所有计划步骤都已完成
-        if current_step >= len(plan_steps):
-            logger.info("Decision node: All planned steps completed, moving to synthesize")
-            return {"should_continue": False}
-
-        # 检查最后一步的结果
-        if step_results:
-            last_result = step_results[-1]
-
-            # 如果最后一步失败，需要调整计划
-            if last_result.get("status") == "failed":
-                logger.warning(f"Decision node: Last step failed, adjusting plan")
-                # 使用 LLM 判断如何调整
-                return {"should_continue": True, "decision": "adjust_plan"}
-
-        # 检查是否已经有足够的信息
-        if self._has_enough_information(state):
-            logger.info("Decision node: Enough information gathered, moving to synthesize")
-            return {"should_continue": False}
 
         # 检查是否达到最大迭代次数
         if current_step >= settings.agent_max_iterations:
@@ -234,9 +290,81 @@ class GraphExecutor:
             )
             return {"should_continue": False}
 
-        # 继续执行下一步
-        logger.info("Decision node: Continuing to next step")
-        return {"should_continue": True}
+        # 构建决策 prompt，让 LLM 判断下一步
+        decision_prompt = self._build_adjustment_plan_prompt(
+            original_input, step_results, plan_steps, current_step
+        )
+
+        # 调用 LLM 做决策
+        from langchain_core.messages import HumanMessage, AIMessage
+
+        messages = state["messages"] + [HumanMessage(content=decision_prompt)]
+        
+        # 检查消息长度，如果超长则直接结束分析
+        is_too_long, total_length = self._check_messages_length(messages, max_total_length=120000)
+        if is_too_long:
+            logger.warning(f"Decision node: Messages too long ({total_length} chars), forcing synthesize")
+            return {"should_continue": False, "messages": messages}
+        
+        try:
+            response = self.llm.invoke(messages)
+            messages.append(AIMessage(content=response.content))
+            
+            # 解析 LLM 的决策
+            decision = self._parse_decision(response.content)
+            
+            action = decision.get("action", "synthesize")
+            reasoning = decision.get("reasoning", "")
+            next_steps = decision.get("next_steps", [])
+            
+            logger.info(f"Decision node: LLM decided to '{action}'. Reasoning: {reasoning[:200]}")
+            logger.info(f"Decision node: Extracted {len(next_steps)} next steps")
+            
+            if action == "continue":
+                # LLM 决定继续，获取新步骤
+                if not next_steps:
+                    logger.warning("Decision node: LLM said continue but provided no steps")
+                    logger.warning(f"Decision node: Full LLM response: {response.content[:500]}")
+                    logger.warning("Decision node: Forcing synthesize due to missing next_steps")
+                    return {"should_continue": False, "messages": messages}
+                
+                # 扩展 plan_steps
+                updated_plan_steps = list(plan_steps)
+                for new_step_data in next_steps:
+                    step_number = len(updated_plan_steps) + 1
+                    updated_plan_steps.append({
+                        "step": step_number,
+                        "action": new_step_data.get("action", "未知操作"),
+                        "target": new_step_data.get("target", ""),
+                    })
+                
+                logger.info(f"Decision node: Plan expanded from {len(plan_steps)} to {len(updated_plan_steps)} steps")
+                
+                # 发送更新后的 plan 给前端
+                if self.message_queue:
+                    try:
+                        self.message_queue.put_nowait({
+                            "event": "plan",
+                            "data": {"steps": updated_plan_steps}
+                        })
+                        logger.info(f"Decision node: Updated plan sent to frontend")
+                    except Exception as e:
+                        logger.error(f"Failed to queue updated plan: {e}")
+                
+                return {
+                    "should_continue": True,
+                    "plan_steps": updated_plan_steps,
+                    "messages": messages,
+                }
+            
+            else:  # action == "synthesize"
+                logger.info("Decision node: LLM decided to synthesize final result")
+                return {"should_continue": False, "messages": messages}
+                
+        except Exception as e:
+            logger.error(f"Decision node: Error during LLM decision: {e}", exc_info=True)
+            logger.warning("Decision node: Falling back to synthesize due to error")
+            return {"should_continue": False}
 
     def _synthesize_node(self, state: AgentState) -> Dict[str, Any]:
         """综合节点：整合所有步骤结果，生成最终分析结论
@@ -260,14 +388,34 @@ class GraphExecutor:
         from langchain_core.messages import HumanMessage, AIMessage
 
         messages = state["messages"] + [HumanMessage(content=synthesize_prompt)]
+        
+        # 检查消息长度，如果超长则基于已有信息生成简化结果
+        is_too_long, total_length = self._check_messages_length(messages, max_total_length=120000)
+        if is_too_long:
+            logger.warning(f"Synthesize node: Messages too long ({total_length} chars), generating simplified result based on available information")
+            
+            # 基于已有步骤结果生成简化结论
+            final_result = self._generate_simplified_result(original_input, step_results)
+            # 添加一条系统消息说明情况
+            from langchain_core.messages import AIMessage
+            messages.append(AIMessage(content="由于对话上下文过长，已基于已执行的步骤生成简化分析结果。"))
+        else:
+            response = self.llm.invoke(messages)
+            messages.append(AIMessage(content=response.content))
 
-        response = self.llm.invoke(messages)
-        messages.append(AIMessage(content=response.content))
-
-        # 提取结构化结果
-        final_result = self._parse_synthesis_result(response.content)
+            # 提取结构化结果
+            final_result = self._parse_synthesis_result(response.content)
 
         logger.info("Synthesize node: Final analysis generated")
+
+        # 立即通过消息队列发送 result 消息
+        if self.message_queue:
+            try:
+                self.message_queue.put_nowait({"event": "result", "data": final_result})
+                self.message_queue.put_nowait({"event": "done", "data": {"message": "Analysis completed"}})
+                logger.info("Result and done messages queued")
+            except Exception as e:
+                logger.error(f"Failed to queue result message: {e}", exc_info=True)
 
         return {"messages": messages, "final_result": final_result}
 
@@ -285,10 +433,10 @@ class GraphExecutor:
     def _build_initial_plan_prompt(
         self, input_text: str, context_files: Optional[List[Dict]]
     ) -> str:
-        """构建初始计划生成的 prompt"""
+        """构建初始计划生成的 prompt - 只生成第一步"""
         tools_description = "\n".join([f"- {tool.name}: {tool.description}" for tool in self.tools])
 
-        prompt = f"""请分析以下问题，并制定详细的分析计划。
+        prompt = f"""请分析以下问题，并制定**第一步**的分析计划（不要一次性规划所有步骤）。
 
 用户问题：
 {input_text}
@@ -297,17 +445,26 @@ class GraphExecutor:
 {tools_description}
 
 要求：
-1. 计划要具体、可执行，每个步骤对应一个工具调用或分析操作
-2. 步骤要按逻辑顺序排列，建议顺序：代码分析 → 日志查询（如需要）→ 代码定位 → 综合分析
-3. 如果问题涉及错误或异常，必须包含使用代码工具（code_search）定位错误代码位置的步骤
-4. 优先使用代码库分析，因为代码是问题的根源
-5. 计划步骤不超过 5-7 个
+1. **只规划第一步**，不要试图一次性规划完整流程
+2. 第一步应该是最关键的信息收集步骤（通常是代码搜索）
+3. 步骤必须具体、可执行，明确指定搜索目标
+
+**重要：**
+- 如果使用 code_search 工具，target 字段必须是**实际的搜索字符串**（例如：错误信息、函数名、变量名等），而不是中文描述
+- 如果用户输入包含错误信息，直接提取并使用该错误信息作为搜索字符串
+- target 应该是可以直接在代码中搜索的字符串，而不是"定位错误信息"这样的描述
+- 如果用户输入包含文件路径和行号（如 "file.py:42" 或 "file.py line 10-20"），可以在 target 中包含行号信息，系统会自动提取并只返回指定行的内容
+
+示例：
+- ✅ 正确：如果用户输入包含 "FileNotFoundError: config.json"，则步骤1: 使用 code_search 工具搜索代码仓库中包含 "FileNotFoundError" 或 "config.json" 的代码片段 - 定位错误信息对应的代码位置
+- ✅ 正确：如果用户输入包含函数名 "processPayment"，则步骤1: 使用 code_search 工具搜索代码仓库中包含 "processPayment" 的函数定义 - 定位该函数的实现
+- ✅ 正确：如果用户输入包含 "src/utils.py:10-50"，则步骤1: 使用 code_search 工具查看文件 src/utils.py:10-50 - 查看第10-50行的代码
+- ❌ 错误：步骤1: 使用 code_search 工具搜索代码仓库 - [定位错误信息在代码中的具体位置，找到触发该错误的函数或逻辑分支]
 
 请按照以下格式输出计划：
 步骤1: [具体操作] - [预期目标]
-步骤2: [具体操作] - [预期目标]
-步骤3: [具体操作] - [预期目标]
-..."""
+
+其中，如果使用 code_search，操作中应包含实际的搜索字符串，target 字段也应该是该搜索字符串（可以包含行号范围）。"""
 
         if context_files:
             context_info = "\n".join(
@@ -321,32 +478,110 @@ class GraphExecutor:
         return prompt
 
     def _build_adjustment_plan_prompt(
-        self, input_text: str, step_results: List[Dict], current_plan: List[Dict], current_step: int
+        self,
+        input_text: str,
+        step_results: List[Dict],
+        plan_steps: List[Dict],
+        current_step: int,
     ) -> str:
-        """构建计划调整的 prompt"""
-        completed_steps = current_plan[:current_step]
-        remaining_steps = current_plan[current_step:]
+        """根据已有结果，动态生成下一步计划"""
+        tools_description = "\n".join([f"- {tool.name}: {tool.description}" for tool in self.tools])
 
-        prompt = f"""根据已执行的步骤结果，调整分析计划。
+        # 格式化已执行步骤的结果（包含成功和失败的情况）
+        executed_info = []
+        for i, result in enumerate(step_results):
+            step_info = plan_steps[i] if i < len(plan_steps) else {}
+            action = step_info.get('action', 'unknown')
+            status = result.get("status", "unknown")
+            
+            if status == "failed":
+                # 工具调用失败：明确告诉 AI 失败的原因和上下文
+                error = result.get("error", "未知错误")
+                tool_name = result.get("tool_name", "未知工具")
+                tool_input = result.get("tool_input", "N/A")
+                executed_info.append(
+                    f"步骤 {i + 1}: {action}\n"
+                    f"状态: ❌ 失败\n"
+                    f"使用的工具: {tool_name}\n"
+                    f"工具输入: {tool_input}\n"
+                    f"错误信息: {error[:500]}\n"
+                    f"目标: {result.get('target', 'N/A')}\n"
+                )
+            else:
+                # 成功的结果
+                result_str = str(result.get('result', 'N/A'))
+                if len(result_str) > 500:
+                    executed_info.append(
+                        f"步骤 {i + 1}: {action}\n"
+                        f"状态: ✅ 成功\n"
+                        f"结果摘要: {result_str[:500]}... (已截断)\n"
+                    )
+                else:
+                    executed_info.append(
+                        f"步骤 {i + 1}: {action}\n"
+                        f"状态: ✅ 成功\n"
+                        f"结果: {result_str}\n"
+                    )
 
-用户问题：
+        # 检查是否有失败的步骤
+        has_failed_steps = any(r.get("status") == "failed" for r in step_results)
+        failed_info = ""
+        if has_failed_steps:
+            failed_info = "\n**注意：部分步骤执行失败。请分析失败原因，考虑是否需要：\n" \
+                         "- 使用其他工具或方法重试\n" \
+                         "- 调整搜索策略\n" \
+                         "- 或者基于已有信息（包括失败信息）得出结论\n"
+
+        prompt = f"""你是一个智能分析 Agent。请根据已执行步骤的结果，动态决定下一步。
+
+原始问题：
 {input_text}
 
-已完成的步骤：
-{self._format_step_results(completed_steps, step_results)}
+已执行的步骤和结果：
+{''.join(executed_info)}
+{failed_info}
+可用工具：
+{tools_description}
 
-剩余的计划步骤：
-{self._format_plan_steps(remaining_steps)}
+**重要要求：**
+1. 如果已有足够信息得出结论（包括基于失败信息可以推断的情况） → 回复 "action": "synthesize"，此时不需要 next_steps
+2. 如果需要继续收集信息（包括工具调用失败后需要尝试其他方法） → **必须**回复 "action": "continue"，并且 **必须**提供 next_steps 数组，至少包含一个步骤
+3. **如果选择 continue，next_steps 不能为空！** 必须明确指定下一步要执行的操作
+4. **如果步骤失败，请分析失败原因，决定是重试、换方法，还是基于已有信息得出结论**
 
-请分析当前执行情况，并决定：
-1. 是否需要修改剩余步骤？
-2. 是否需要添加新的步骤？
-3. 是否可以直接结束并生成结论？
+**关键：使用 code_search 时的 target 字段规则：**
+- target 必须是**实际的搜索字符串**（例如：错误信息、函数名、变量名等），而不是中文描述
+- 如果原始问题包含错误信息，直接提取并使用该错误信息作为 target
+- target 应该是可以直接在代码中搜索的字符串
+- 如果用户输入包含文件路径和行号（如 "file.py:42" 或 "file.py line 10-20"），可以在 target 中包含行号信息，系统会自动提取并只返回指定行的内容，减少上下文
 
-如果需要调整计划，请按照以下格式输出调整后的步骤：
-步骤{current_step + 1}: [具体操作] - [预期目标]
-步骤{current_step + 2}: [具体操作] - [预期目标]
-..."""
+示例：
+- ✅ 正确：如果用户输入包含 "FileNotFoundError"，则 {{"action": "使用 code_search 工具搜索代码仓库中包含 'FileNotFoundError' 的代码片段", "target": "FileNotFoundError"}}
+- ✅ 正确：如果用户输入包含函数名 "processPayment"，则 {{"action": "使用 code_search 工具搜索代码仓库中包含 'processPayment' 的函数定义", "target": "processPayment"}}
+- ✅ 正确：如果用户输入包含 "src/utils.py:10-50"，则 {{"action": "使用 code_search 工具查看文件 src/utils.py:10-50", "target": "src/utils.py:10-50"}}
+- ❌ 错误：{{"action": "使用 code_search 工具搜索代码仓库", "target": "[定位错误信息在代码中的具体位置]"}}
+
+请严格按照以下JSON格式回复（不要添加任何其他文本）：
+```json
+{{
+  "action": "continue" 或 "synthesize",
+  "reasoning": "决策理由（说明为什么选择继续或结束）",
+  "next_steps": [
+    {{
+      "step": {current_step + 1},
+      "action": "具体操作描述（如果使用 code_search，应包含实际的搜索字符串，例如：使用 code_search 工具搜索代码仓库中包含 'FileNotFoundError' 的代码片段）",
+      "target": "实际的搜索字符串（如果使用 code_search，必须是可以在代码中直接搜索的字符串，例如：'FileNotFoundError'、'processPayment' 或 'src/utils.py:10-50'，而不是中文描述）"
+    }}
+  ]
+}}
+```
+
+**注意：**
+- 如果 action 是 "continue"，next_steps 必须是一个非空数组
+- 如果 action 是 "synthesize"，next_steps 可以为空数组或省略
+- **如果使用 code_search，target 必须是实际的搜索字符串，不是中文描述！**
+- **如果查看文件，可以在文件路径后添加行号范围（如 'file.py:10-50'），减少返回的上下文**
+- 请确保 JSON 格式正确，可以直接被解析"""
 
         return prompt
 
@@ -423,16 +658,63 @@ class GraphExecutor:
         action = step.get("action", "")
         target = step.get("target", "")
         step_results = state["step_results"]
+        original_input = state.get("original_input", "")
 
         # 如果是代码搜索，尝试从之前的步骤结果中提取相关信息
         if self._map_action_to_tool(action) == "code_search":
             if target:
                 query = target
+                # 如果 target 是中文描述，尝试从原始输入中提取实际的错误字符串
+                if self._is_chinese_description(query):
+                    extracted_query = self._extract_error_string_from_input(original_input)
+                    if extracted_query:
+                        logger.info(f"Extracted error string from input: {extracted_query}, using it instead of Chinese description")
+                        query = extracted_query
             else:
                 # 如果没有明确的目标，从之前的结果中提取
                 query = self._extract_query_from_results(step_results)
+                if not query:
+                    # 如果还是找不到，尝试从原始输入中提取
+                    query = self._extract_error_string_from_input(original_input) or "error"
+            
+            # 从查询中提取行号范围（如果包含）
+            line_start, line_end = self._extract_line_range_from_query(query)
+            
+            # 如果提取到行号，清理 query（移除行号部分），保留文件路径
+            clean_query = query
+            search_type = "auto"  # 初始化搜索类型
+            if line_start:
+                import re
+                # 移除行号部分，保留文件路径
+                clean_query = re.sub(r':\d+(?:[-:]?\d+)?', '', query)
+                clean_query = re.sub(r'\s+line[s]?\s+\d+(?:\s*[-–]\s*\d+)?', '', clean_query, flags=re.IGNORECASE)
+                clean_query = clean_query.strip()
+                # 如果清理后的 query 看起来像文件路径，设置 search_type 为 "file"
+                if clean_query.endswith(('.py', '.js', '.ts', '.java', '.cpp', '.h', '.c', '.hpp', '.go', '.rs')) or '/' in clean_query or '\\' in clean_query:
+                    search_type = "file"
+            
+            # 从 action 中推断搜索类型（如果还没有设置）
+            if search_type == "auto":
+                action_lower = action.lower()
+                if "函数" in action or "function" in action_lower:
+                    search_type = "function"
+                elif "类" in action or "class" in action_lower:
+                    search_type = "class"
+                elif "变量" in action or "variable" in action_lower:
+                    search_type = "variable"
+                elif "字符串" in action or "string" in action_lower:
+                    search_type = "string"
+                elif "文件" in action or "file" in action_lower or clean_query.endswith(('.py', '.js', '.ts', '.java', '.cpp', '.h')):
+                    search_type = "file"
 
-            return {"query": query, "max_lines": 100, "include_context": True}
+            return {
+                "query": clean_query, 
+                "search_type": search_type,
+                "line_start": line_start,
+                "line_end": line_end,
+                "max_results": 10, 
+                "include_context": True
+            }
 
         # 日志搜索
         if self._map_action_to_tool(action) == "log_search":
@@ -468,16 +750,42 @@ class GraphExecutor:
 
     def _parse_plan(self, plan_text: str) -> List[Dict[str, Any]]:
         """解析 LLM 生成的计划文本"""
+        import re
         steps = []
+        
+        # 首先尝试从 JSON 中提取 next_steps
+        try:
+            json_match = re.search(r'"next_steps"\s*:\s*\[([\s\S]*?)\]', plan_text)
+            if json_match:
+                # 尝试解析 next_steps 数组
+                next_steps_str = json_match.group(0)
+                # 提取完整的 JSON 对象
+                full_json_match = re.search(r'\{[\s\S]*"next_steps"[\s\S]*?\}', plan_text)
+                if full_json_match:
+                    parsed = json.loads(full_json_match.group(0))
+                    if "next_steps" in parsed and isinstance(parsed["next_steps"], list):
+                        for step_data in parsed["next_steps"]:
+                            if isinstance(step_data, dict):
+                                steps.append({
+                                    "step": step_data.get("step", len(steps) + 1),
+                                    "action": step_data.get("action", ""),
+                                    "target": step_data.get("target", ""),
+                                    "status": "pending"
+                                })
+                        if steps:
+                            return steps
+        except:
+            pass
+        
+        # 如果 JSON 解析失败，尝试从文本中提取
         lines = plan_text.split("\n")
-
+        
         for line in lines:
             line = line.strip()
             if not line:
                 continue
 
-            import re
-
+            # 匹配 "步骤N: 操作 - 目标" 格式
             step_pattern = r"步骤\s*(\d+)\s*[:：]\s*(.+?)(?:\s*-\s*(.+))?$"
             match = re.match(step_pattern, line)
 
@@ -489,27 +797,269 @@ class GraphExecutor:
                 steps.append(
                     {"step": step_num, "action": action, "target": target, "status": "pending"}
                 )
+            else:
+                # 尝试匹配 "action": "xxx", "target": "xxx" 格式（从 JSON 片段中提取）
+                action_match = re.search(r'"action"\s*:\s*"([^"]+)"', line)
+                target_match = re.search(r'"target"\s*:\s*"([^"]+)"', line)
+                if action_match:
+                    action = action_match.group(1)
+                    target = target_match.group(1) if target_match else ""
+                    steps.append({
+                        "step": len(steps) + 1,
+                        "action": action,
+                        "target": target,
+                        "status": "pending"
+                    })
 
         return steps
 
+    def _parse_decision(self, llm_response: str) -> Dict[str, Any]:
+        """解析 LLM 的决策响应"""
+        import re
+        
+        def extract_json_from_text(text: str) -> Dict[str, Any] | None:
+            """从文本中提取 JSON 对象（支持嵌套结构）"""
+            # 方式1：从 ```json ``` 代码块中提取
+            json_match = re.search(r"```json\s*(\{[\s\S]*\})\s*```", text)
+            if json_match:
+                try:
+                    return json.loads(json_match.group(1))
+                except json.JSONDecodeError:
+                    pass
+            
+            # 方式2：从 ``` ``` 代码块中提取（不带 json 标签）
+            json_match = re.search(r"```\s*(\{[\s\S]*\})\s*```", text)
+            if json_match:
+                try:
+                    return json.loads(json_match.group(1))
+                except json.JSONDecodeError:
+                    pass
+            
+            # 方式3：找到第一个 { 和最后一个 } 之间的内容（平衡括号）
+            first_brace = text.find('{')
+            if first_brace == -1:
+                return None
+            
+            # 从第一个 { 开始，找到匹配的最后一个 }
+            brace_count = 0
+            last_brace = first_brace
+            for i in range(first_brace, len(text)):
+                if text[i] == '{':
+                    brace_count += 1
+                elif text[i] == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        last_brace = i
+                        break
+            
+            if brace_count == 0 and last_brace > first_brace:
+                json_str = text[first_brace:last_brace + 1]
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
+            
+            return None
+        
+        # 尝试提取 JSON
+        parsed_json = extract_json_from_text(llm_response)
+        if parsed_json:
+            action = parsed_json.get("action", "").lower()
+            reasoning = parsed_json.get("reasoning", "")
+            next_steps = parsed_json.get("next_steps", [])
+            
+            # 验证 action
+            if action == "synthesize":
+                return {
+                    'action': 'synthesize',
+                    'reasoning': reasoning or llm_response[:200],
+                    'next_steps': []
+                }
+            elif action == "continue":
+                # 如果 action 是 continue，必须提供 next_steps
+                if not next_steps or len(next_steps) == 0:
+                    logger.warning(f"[_parse_decision] LLM returned 'continue' but next_steps is empty. Full response: {llm_response[:500]}")
+                    # 尝试从文本中解析步骤
+                    steps = self._parse_plan(llm_response)
+                    if steps:
+                        logger.info(f"[_parse_decision] Extracted {len(steps)} steps from text fallback")
+                        return {
+                            'action': 'continue',
+                            'reasoning': reasoning or llm_response[:200],
+                            'next_steps': steps
+                        }
+                    else:
+                        # 如果还是无法提取，返回空数组（会被上层处理）
+                        return {
+                            'action': 'continue',
+                            'reasoning': reasoning or llm_response[:200],
+                            'next_steps': []
+                        }
+                else:
+                    return {
+                        'action': 'continue',
+                        'reasoning': reasoning or llm_response[:200],
+                        'next_steps': next_steps
+                    }
+        
+        # 如果无法解析 JSON，使用文本分析作为后备
+        logger.warning(f"[_parse_decision] Failed to parse JSON, falling back to text analysis. Response: {llm_response[:300]}")
+        llm_lower = llm_response.lower()
+        if 'synthesize' in llm_lower or '足够' in llm_response or '结束' in llm_response:
+            return {'action': 'synthesize', 'reasoning': llm_response[:200], 'next_steps': []}
+        else:
+            # 默认继续，尝试从文本中提取步骤
+            steps = self._parse_plan(llm_response)
+            return {
+                'action': 'continue',
+                'reasoning': llm_response[:200],
+                'next_steps': steps if steps else []
+            }
+
     def _parse_synthesis_result(self, result_text: str) -> Dict[str, Any]:
         """解析综合分析的结果"""
-        # 尝试提取 JSON
         import re
-
-        json_match = re.search(r"```json\s*(\{.*?\})\s*```", result_text, re.DOTALL)
-
-        if json_match:
+        
+        logger.info(f"[_parse_synthesis_result] Input text (first 200 chars): {result_text[:200]}")
+        
+        def clean_json_string(s: str) -> str:
+            """清理 JSON 字符串中的控制字符"""
+            # 替换未转义的控制字符（保留已转义的 \n, \t 等）
+            # 这里我们将实际的换行符替换为 \\n，制表符替换为 \\t
+            result = []
+            i = 0
+            in_string = False
+            while i < len(s):
+                c = s[i]
+                if c == '"' and (i == 0 or s[i-1] != '\\'):
+                    in_string = not in_string
+                    result.append(c)
+                elif in_string and c == '\n':
+                    result.append('\\n')
+                elif in_string and c == '\r':
+                    result.append('\\r')
+                elif in_string and c == '\t':
+                    result.append('\\t')
+                elif in_string and ord(c) < 32 and c not in '\n\r\t':
+                    # 其他控制字符用空格替换
+                    result.append(' ')
+                else:
+                    result.append(c)
+                i += 1
+            return ''.join(result)
+        
+        def try_parse_json(json_str: str) -> Dict[str, Any] | None:
+            """尝试解析 JSON，包括清理控制字符"""
+            # 首先尝试直接解析
             try:
-                return json.loads(json_match.group(1))
+                return json.loads(json_str)
             except json.JSONDecodeError:
                 pass
+            
+            # 尝试清理后解析
+            try:
+                cleaned = clean_json_string(json_str)
+                return json.loads(cleaned)
+            except json.JSONDecodeError:
+                pass
+            
+            # 尝试使用 strict=False（允许某些控制字符）
+            try:
+                return json.loads(json_str, strict=False)
+            except json.JSONDecodeError:
+                pass
+            
+            return None
+        
+        # 尝试多种方式提取 JSON
+        
+        # 方式1：从 ```json ``` 代码块中提取
+        json_match = re.search(r"```json\s*(\{[\s\S]*\})\s*```", result_text)
+        if json_match:
+            logger.info("[_parse_synthesis_result] Found ```json code block")
+            parsed = try_parse_json(json_match.group(1))
+            if parsed:
+                logger.info(f"[_parse_synthesis_result] Successfully parsed JSON, root_cause: {str(parsed.get('root_cause', ''))[:100]}")
+                return parsed
+            else:
+                logger.warning("[_parse_synthesis_result] Failed to parse ```json code block")
+        
+        # 方式2：从 ``` ``` 代码块中提取（不带 json 标签）
+        json_match = re.search(r"```\s*(\{[\s\S]*\})\s*```", result_text)
+        if json_match:
+            parsed = try_parse_json(json_match.group(1))
+            if parsed:
+                logger.info("[_parse_synthesis_result] Successfully parsed from ``` code block")
+                return parsed
+        
+        # 方式3：直接查找 JSON 对象（以 { 开头，以 } 结尾）
+        first_brace = result_text.find('{')
+        last_brace = result_text.rfind('}')
+        if first_brace != -1 and last_brace > first_brace:
+            json_str = result_text[first_brace:last_brace + 1]
+            parsed = try_parse_json(json_str)
+            if parsed:
+                logger.info("[_parse_synthesis_result] Successfully parsed from brace extraction")
+                return parsed
 
         # 如果无法解析 JSON，返回原始文本
+        logger.warning("[_parse_synthesis_result] Could not parse JSON, returning raw text as root_cause")
         return {
             "root_cause": result_text,
             "suggestions": [],
             "confidence": 0.5,
+            "related_code": [],
+            "related_logs": [],
+        }
+    
+    def _generate_simplified_result(self, input_text: str, step_results: List[Dict]) -> Dict[str, Any]:
+        """当 prompt 超长时，基于已有步骤结果生成简化结论
+        
+        Args:
+            input_text: 原始输入
+            step_results: 已执行的步骤结果列表
+        
+        Returns:
+            简化的分析结果
+        """
+        logger.info("Generating simplified result due to prompt length limit")
+        
+        # 统计成功和失败的步骤
+        successful_steps = [r for r in step_results if r.get("status") == "completed"]
+        failed_steps = [r for r in step_results if r.get("status") == "failed"]
+        
+        # 提取关键信息
+        root_cause_parts = []
+        suggestions = []
+        
+        if failed_steps:
+            root_cause_parts.append(f"部分步骤执行失败（{len(failed_steps)}/{len(step_results)}），可能影响分析的完整性。")
+            suggestions.append("建议：重新运行分析，或尝试更具体的搜索条件。")
+        
+        if successful_steps:
+            # 从成功步骤中提取关键信息
+            for step in successful_steps[:3]:  # 只取前3个成功步骤
+                result_str = str(step.get("result", ""))[:200]
+                if result_str:
+                    root_cause_parts.append(f"步骤 '{step.get('action', '')}' 的结果：{result_str}...")
+        
+        # 构建根因分析
+        if root_cause_parts:
+            root_cause = "由于对话上下文过长，已基于已执行的步骤生成简化分析。\n\n" + "\n".join(root_cause_parts)
+        else:
+            root_cause = "由于对话上下文过长，无法生成完整分析。建议重新运行分析或使用更具体的查询条件。"
+        
+        # 如果没有建议，添加默认建议
+        if not suggestions:
+            suggestions = [
+                "建议：重新运行分析，使用更具体的查询条件以减少上下文长度。",
+                "建议：分步骤分析，先解决部分问题，再逐步深入。",
+            ]
+        
+        return {
+            "root_cause": root_cause,
+            "suggestions": suggestions,
+            "confidence": 0.3,  # 降低置信度，因为这是简化结果
             "related_code": [],
             "related_logs": [],
         }
@@ -554,6 +1104,86 @@ class GraphExecutor:
                     return match.group(1)
 
         return "error"
+    
+    def _is_chinese_description(self, text: str) -> bool:
+        """判断文本是否是中文描述（而不是实际的错误字符串）"""
+        if not text:
+            return False
+        
+        # 如果包含中文字符，且长度较长，可能是中文描述
+        import re
+        has_chinese = bool(re.search(r'[\u4e00-\u9fff]', text))
+        is_long = len(text) > 30
+        
+        # 如果包含常见的描述性词汇，更可能是描述
+        description_keywords = ['定位', '找到', '搜索', '查询', '分析', '获取', '提取', '确认']
+        has_keywords = any(keyword in text for keyword in description_keywords)
+        
+        return has_chinese and (is_long or has_keywords)
+    
+    def _extract_error_string_from_input(self, input_text: str) -> str:
+        """从原始输入中提取实际的错误字符串"""
+        if not input_text:
+            return ""
+        
+        import re
+        
+        # 尝试提取引号中的字符串（可能是错误信息）
+        # 匹配单引号或双引号中的内容
+        quoted_strings = re.findall(r'["\']([^"\']+)["\']', input_text)
+        for quoted in quoted_strings:
+            # 如果包含英文和常见错误关键词，可能是错误信息
+            if re.search(r'[a-zA-Z]', quoted) and len(quoted) > 10:
+                # 检查是否包含常见的错误关键词
+                error_keywords = ['error', 'fail', 'exception', 'no', 'not found', 'missing', 'tag', 'when']
+                if any(keyword.lower() in quoted.lower() for keyword in error_keywords):
+                    return quoted
+        
+        # 尝试提取日志格式的错误信息（例如：no targetStrategy tag when determinePerf）
+        # 匹配类似 "no ... when ..." 的模式
+        error_patterns = [
+            r'no\s+\w+\s+\w+.*when\s+\w+',  # no targetStrategy tag when determinePerf
+            r'error:\s*([^\n]+)',  # error: ...
+            r'Error:\s*([^\n]+)',  # Error: ...
+            r'failed\s+to\s+([^\n]+)',  # failed to ...
+        ]
+        
+        for pattern in error_patterns:
+            match = re.search(pattern, input_text, re.IGNORECASE)
+            if match:
+                error_str = match.group(1) if match.lastindex else match.group(0)
+                if len(error_str.strip()) > 5:
+                    return error_str.strip()
+        
+        return ""
+    
+    def _extract_line_range_from_query(self, query: str) -> tuple[Optional[int], Optional[int]]:
+        """从查询中提取行号范围
+        
+        支持的格式：
+        - "file.py:10" -> (10, None)
+        - "file.py:10-20" -> (10, 20)
+        - "file.py:10:20" -> (10, 20)
+        - "file.py line 10" -> (10, None)
+        - "file.py lines 10-20" -> (10, 20)
+        """
+        import re
+        
+        # 匹配 file.py:10 或 file.py:10-20 格式
+        match = re.search(r':(\d+)(?:[-:](\d+))?', query)
+        if match:
+            line_start = int(match.group(1))
+            line_end = int(match.group(2)) if match.group(2) else None
+            return line_start, line_end
+        
+        # 匹配 "line 10" 或 "lines 10-20" 格式
+        match = re.search(r'line[s]?\s+(\d+)(?:\s*[-–]\s*(\d+))?', query, re.IGNORECASE)
+        if match:
+            line_start = int(match.group(1))
+            line_end = int(match.group(2)) if match.group(2) else None
+            return line_start, line_end
+        
+        return None, None
 
     def _format_step_results(self, steps: List[Dict], results: List[Dict]) -> str:
         """格式化步骤结果"""
@@ -566,16 +1196,28 @@ class GraphExecutor:
 
         return "\n".join(formatted)
 
-    def _format_all_step_results(self, results: List[Dict]) -> str:
-        """格式化所有步骤结果"""
+    def _format_all_step_results(self, results: List[Dict], max_length_per_result: int = 1000) -> str:
+        """格式化所有步骤结果，包含成功和失败的情况"""
         formatted = []
         for i, result in enumerate(results, 1):
-            status_icon = "✓" if result.get("status") == "completed" else "✗"
-            formatted.append(f"{status_icon} 步骤 {i}: {result.get('action')}")
-            if result.get("result"):
-                formatted.append(f"  结果: {result.get('result')[:200]}...")
-            if result.get("error"):
-                formatted.append(f"  错误: {result.get('error')}")
+            status = result.get("status", "unknown")
+            status_icon = "✓" if status == "completed" else "✗"
+            action = result.get('action', '未知操作')
+            formatted.append(f"{status_icon} 步骤 {i}: {action}")
+            
+            # 显示失败信息（重要：让 AI 知道工具调用失败的原因）
+            if status == "failed":
+                error = result.get("error", "未知错误")
+                formatted.append(f"  状态: 失败")
+                formatted.append(f"  错误信息: {error[:500]}")  # 限制错误信息长度
+                formatted.append(f"  目标: {result.get('target', 'N/A')}")
+            elif result.get("result"):
+                # 成功的结果，截断过长的内容
+                result_str = str(result.get('result'))
+                if len(result_str) > max_length_per_result:
+                    formatted.append(f"  结果: {result_str[:max_length_per_result]}... (已截断，原始长度: {len(result_str)} 字符)")
+                else:
+                    formatted.append(f"  结果: {result_str}")
 
         return "\n".join(formatted)
 
@@ -584,6 +1226,101 @@ class GraphExecutor:
         return "\n".join(
             [f"步骤 {s.get('step')}: {s.get('action')} - {s.get('target', '')}" for s in steps]
         )
+    
+    def _truncate_prompt_if_needed(self, prompt: str, max_length: int = 120000) -> str:
+        """如果 prompt 超过最大长度，进行截断
+        
+        Args:
+            prompt: 原始 prompt
+            max_length: 最大长度（默认 120000，留一些余量）
+        
+        Returns:
+            截断后的 prompt
+        """
+        if len(prompt) <= max_length:
+            return prompt
+        
+        logger.warning(f"Prompt too long ({len(prompt)} chars), truncating to {max_length} chars")
+        
+        # 尝试智能截断：保留开头和结尾的重要部分
+        # 开头保留 60%，结尾保留 40%
+        header_length = int(max_length * 0.6)
+        footer_length = max_length - header_length
+        
+        truncated = prompt[:header_length] + "\n\n[... 中间内容已截断 ...]\n\n" + prompt[-footer_length:]
+        
+        logger.info(f"Prompt truncated: {len(truncated)} chars")
+        return truncated
+    
+    def _check_messages_length(self, messages: List, max_total_length: int = 120000) -> tuple[bool, int]:
+        """检查消息列表的总长度是否超过限制
+        
+        Args:
+            messages: LangChain 消息列表
+            max_total_length: 最大总长度
+        
+        Returns:
+            (是否超长, 总长度)
+        """
+        total_length = sum(len(str(msg.content)) for msg in messages if hasattr(msg, 'content'))
+        is_too_long = total_length > max_total_length
+        return is_too_long, total_length
+    
+    def _truncate_messages_if_needed(self, messages: List, max_total_length: int = 120000) -> List:
+        """如果消息列表的总长度超过限制，截断最长的消息
+        
+        注意：当前策略是如果超长则直接结束分析，此函数暂时保留但不会被调用
+        后续优化时可以用于压缩对话 context
+        
+        Args:
+            messages: LangChain 消息列表
+            max_total_length: 最大总长度
+        
+        Returns:
+            截断后的消息列表
+        """
+        # 计算总长度
+        total_length = sum(len(str(msg.content)) for msg in messages if hasattr(msg, 'content'))
+        
+        if total_length <= max_total_length:
+            return messages
+        
+        logger.warning(f"Messages total length ({total_length} chars) exceeds limit ({max_total_length}), truncating")
+        
+        # 找到最长的消息并截断
+        truncated_messages = []
+        remaining_length = max_total_length
+        
+        for msg in messages:
+            if not hasattr(msg, 'content'):
+                truncated_messages.append(msg)
+                continue
+            
+            content = str(msg.content)
+            msg_length = len(content)
+            
+            if remaining_length > msg_length:
+                # 消息可以完整保留
+                truncated_messages.append(msg)
+                remaining_length -= msg_length
+            else:
+                # 需要截断这条消息
+                if remaining_length > 1000:  # 至少保留一些内容
+                    truncated_content = content[:remaining_length] + "\n[... 内容已截断 ...]"
+                    # 创建新消息对象（保持类型）
+                    from langchain_core.messages import HumanMessage, AIMessage
+                    if isinstance(msg, HumanMessage):
+                        truncated_messages.append(HumanMessage(content=truncated_content))
+                    elif isinstance(msg, AIMessage):
+                        truncated_messages.append(AIMessage(content=truncated_content))
+                    else:
+                        truncated_messages.append(msg)
+                    remaining_length = 0
+                else:
+                    logger.warning(f"Skipping message due to length limit")
+                    break
+        
+        return truncated_messages
 
     async def run(
         self,
@@ -615,9 +1352,19 @@ class GraphExecutor:
 
         # 流式执行图
         async for state in self.graph.astream(initial_state):
+            logger.info(f"GraphExecutor state update: keys={list(state.keys())}, has_plan_steps={bool(state.get('plan_steps'))}")
+            
             # 检查状态变化，发送进度更新
-            if state.get("plan_steps") and state["plan_steps"] != initial_state["plan_steps"]:
-                yield {"event": "plan", "data": {"steps": state["plan_steps"]}}
+            if state.get("plan_steps"):
+                plan_steps = state["plan_steps"]
+                # 检查是否是新的 plan 或更新的 plan
+                if plan_steps != initial_state.get("plan_steps", []):
+                    logger.info(f"Yielding plan with {len(plan_steps)} steps: {plan_steps}")
+                    yield {"event": "plan", "data": {"steps": plan_steps}}
+                    # 更新 initial_state 以避免重复发送
+                    initial_state["plan_steps"] = plan_steps
+                else:
+                    logger.debug(f"Plan unchanged, skipping: {len(plan_steps)} steps")
 
             if state.get("step_results") and state["step_results"] != initial_state["step_results"]:
                 current_step = state.get("current_step", 0)
@@ -645,8 +1392,8 @@ class GraphExecutor:
 class GraphExecutorWrapper:
     """GraphExecutor 包装类，保持与原有 API 兼容"""
 
-    def __init__(self, callbacks=None):
-        self.executor = GraphExecutor(callbacks=callbacks)
+    def __init__(self, callbacks=None, message_queue: Optional[queue.Queue] = None, event_loop: Optional[asyncio.AbstractEventLoop] = None):
+        self.executor = GraphExecutor(callbacks=callbacks, message_queue=message_queue, event_loop=event_loop)
 
     async def run(
         self,

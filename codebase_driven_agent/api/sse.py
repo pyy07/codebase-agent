@@ -2,6 +2,7 @@
 
 import json
 import asyncio
+import queue
 from typing import AsyncGenerator, Optional, Set, List, Dict, Any
 from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse
@@ -130,7 +131,7 @@ async def _run_graph_executor_stream(
     executor: Any,
     input_text: str,
     context_files: Optional[List],
-    message_queue: asyncio.Queue,
+    message_queue: queue.Queue,
 ):
     """
     运行 GraphExecutor 并将事件发送到消息队列
@@ -139,21 +140,22 @@ async def _run_graph_executor_stream(
         executor: GraphExecutorWrapper 实例
         input_text: 用户输入
         context_files: 上下文文件列表
-        message_queue: SSE 消息队列
+        message_queue: SSE 消息队列（线程安全的 queue.Queue）
     """
     try:
         # GraphExecutor.run() 是异步生成器
         async for event in executor.executor.run(input_text, context_files):
             if event and isinstance(event, dict):
-                await message_queue.put(event)
+                # 使用线程安全的 put_nowait
+                message_queue.put_nowait(event)
     except Exception as e:
         logger.error(f"Error in _run_graph_executor_stream: {e}", exc_info=True)
-        await message_queue.put({"event": "error", "data": {"error": str(e)}})
+        message_queue.put_nowait({"event": "error", "data": {"error": str(e)}})
 
 
 async def _execute_analysis_stream(
     request: AnalyzeRequest,
-    message_queue: Optional[asyncio.Queue] = None,
+    message_queue: Optional[queue.Queue] = None,
     request_obj: Optional[Request] = None,
 ) -> AsyncGenerator[str, None]:
     """
@@ -163,7 +165,7 @@ async def _execute_analysis_stream(
 
     Args:
         request: 分析请求
-        message_queue: SSE 消息队列（用于 GraphExecutor）
+        message_queue: SSE 消息队列（使用线程安全的 queue.Queue）
     """
     try:
         # 发送开始消息（立即发送，确保用户看到反馈）
@@ -182,9 +184,9 @@ async def _execute_analysis_stream(
             )
             await asyncio.sleep(0.1)
 
-        # 创建消息队列（如果未提供）
+        # 创建消息队列（使用线程安全的 queue.Queue）
         if message_queue is None:
-            message_queue = asyncio.Queue()
+            message_queue = queue.Queue()
 
         # 解析 context_files
         context_files = None
@@ -223,7 +225,8 @@ async def _execute_analysis_stream(
             logger.debug(f"Failed to clear global cancellation event: {e}")
 
         # 创建 GraphExecutor（新的图式执行器）
-        executor = GraphExecutorWrapper(callbacks=None)
+        event_loop = asyncio.get_event_loop()
+        executor = GraphExecutorWrapper(callbacks=None, message_queue=message_queue, event_loop=event_loop)
 
         # 发送 Agent 启动消息
         try:
@@ -263,8 +266,30 @@ async def _execute_analysis_stream(
             logger.info("Entering message processing loop...")
             while not agent_task.done():
                 try:
-                    # 等待消息队列中的消息，设置超时以便定期检查 agent_task 状态
-                    msg = await asyncio.wait_for(message_queue.get(), timeout=0.5)
+                    # 从线程安全的 queue.Queue 中非阻塞地获取消息
+                    try:
+                        msg = message_queue.get_nowait()
+                    except queue.Empty:
+                        # 队列为空，等待一小段时间后继续
+                        await asyncio.sleep(0.1)
+                        
+                        # 检查是否需要发送心跳
+                        current_time = loop.time()
+                        if current_time - last_progress_time > heartbeat_interval:
+                            try:
+                                yield SSEMessage.progress(
+                                    "分析进行中，请稍候...", progress=0.5, step="processing"
+                                )
+                                last_progress_time = current_time
+                                logger.debug("Heartbeat sent")
+                            except GeneratorExit:
+                                logger.info("Client disconnected during heartbeat")
+                                raise
+                            except asyncio.CancelledError:
+                                logger.info("Task cancelled during heartbeat")
+                                break
+                        continue
+                    
                     if msg:
                         event = msg.get("event", "progress")
                         data = msg.get("data", {})
@@ -289,6 +314,7 @@ async def _execute_analysis_stream(
                                 break
                         elif event == "plan":
                             try:
+                                logger.info(f"Sending plan with {len(data.get('steps', []))} steps to client")
                                 yield SSEMessage.plan(data.get("steps", []))
                                 logger.debug(
                                     f"Plan message sent with {len(data.get('steps', []))} steps"
@@ -312,7 +338,8 @@ async def _execute_analysis_stream(
                             # 保存结果
                             agent_result = data
                             try:
-                                yield SSEMessage.result(data)
+                                # data 已经是字典格式，直接使用 format 而不是 result()
+                                yield SSEMessage.format("result", data)
                             except GeneratorExit:
                                 logger.info("Client disconnected during result message")
                                 raise
@@ -321,29 +348,14 @@ async def _execute_analysis_stream(
                                 break
                         elif event == "done":
                             try:
-                                yield SSEMessage.done()
+                                # data 已经是字典格式，直接使用 format
+                                yield SSEMessage.format("done", data)
                             except GeneratorExit:
                                 logger.info("Client disconnected during done message")
                                 raise
                             except asyncio.CancelledError:
                                 logger.info("Task cancelled during done message")
                                 break
-                except asyncio.TimeoutError:
-                    # 超时，检查是否需要发送心跳
-                    current_time = loop.time()
-                    if current_time - last_progress_time > heartbeat_interval:
-                        try:
-                            yield SSEMessage.progress(
-                                "分析进行中，请稍候...", progress=0.5, step="processing"
-                            )
-                            last_progress_time = current_time
-                            logger.debug("Heartbeat sent")
-                        except GeneratorExit:
-                            logger.info("Client disconnected during heartbeat")
-                            raise
-                        except asyncio.CancelledError:
-                            logger.info("Task cancelled during heartbeat")
-                            break
                 except GeneratorExit:
                     raise
                 except Exception as e:
@@ -351,6 +363,42 @@ async def _execute_analysis_stream(
 
             # 等待 agent 任务完成
             await agent_task
+            
+            # **重要**：agent 任务完成后，继续处理队列中剩余的消息
+            logger.info("Agent task completed, processing remaining queued messages...")
+            remaining_messages = 0
+            while True:
+                try:
+                    msg = message_queue.get_nowait()
+                    if msg:
+                        remaining_messages += 1
+                        event = msg.get("event", "progress")
+                        data = msg.get("data", {})
+                        
+                        logger.info(f"Processing remaining message #{remaining_messages}: {event}")
+                        
+                        if event == "result":
+                            agent_result = data
+                            yield SSEMessage.format("result", data)
+                        elif event == "done":
+                            yield SSEMessage.format("done", data)
+                        elif event == "plan":
+                            yield SSEMessage.plan(data.get("steps", []))
+                        elif event == "progress":
+                            yield SSEMessage.progress(
+                                data.get("message", ""),
+                                progress=data.get("progress", 0.0),
+                                step=data.get("step"),
+                            )
+                        elif event == "error":
+                            yield SSEMessage.error(data.get("error", "Unknown error"))
+                except queue.Empty:
+                    # 队列已空，退出
+                    logger.info(f"All remaining messages processed (total: {remaining_messages})")
+                    break
+                except Exception as e:
+                    logger.error(f"Error processing remaining message: {e}", exc_info=True)
+                    break
 
         except GeneratorExit:
             # 生成器被关闭（客户端断开连接），agent 任务继续在后台运行
