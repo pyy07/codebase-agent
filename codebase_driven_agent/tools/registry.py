@@ -336,6 +336,7 @@ def get_tool_registry() -> ToolRegistry:
 
 def _register_default_tools(registry: ToolRegistry):
     """注册默认工具"""
+    # 核心工具
     try:
         from codebase_driven_agent.tools.code_tool import CodeTool
         registry.register(CodeTool, enabled=True)
@@ -358,4 +359,48 @@ def _register_default_tools(registry: ToolRegistry):
             logger.debug("Database URL not configured, skipping DatabaseTool registration")
     except Exception as e:
         logger.warning(f"Failed to register DatabaseTool: {str(e)}")
+    
+    # 内置工具集
+    try:
+        from codebase_driven_agent.tools.read_tool import ReadTool
+        registry.register(ReadTool, enabled=True)
+    except Exception as e:
+        logger.warning(f"Failed to register ReadTool: {str(e)}")
+    
+    try:
+        from codebase_driven_agent.tools.glob_tool import GlobTool
+        registry.register(GlobTool, enabled=True)
+    except Exception as e:
+        logger.warning(f"Failed to register GlobTool: {str(e)}")
+    
+    try:
+        from codebase_driven_agent.tools.grep_tool import GrepTool
+        registry.register(GrepTool, enabled=True)
+    except Exception as e:
+        logger.warning(f"Failed to register GrepTool: {str(e)}")
+    
+    try:
+        from codebase_driven_agent.tools.bash_tool import BashTool
+        registry.register(BashTool, enabled=True)
+    except Exception as e:
+        logger.warning(f"Failed to register BashTool: {str(e)}")
+    
+    try:
+        from codebase_driven_agent.tools.webfetch_tool import WebFetchTool
+        registry.register(WebFetchTool, enabled=True)
+    except Exception as e:
+        logger.warning(f"Failed to register WebFetchTool: {str(e)}")
+    
+    try:
+        from codebase_driven_agent.tools.websearch_tool import WebSearchTool
+        from codebase_driven_agent.config import settings
+        # 只有在配置了搜索 API Key 时才注册 WebSearchTool
+        exa_key = getattr(settings, 'exa_api_key', None)
+        serper_key = getattr(settings, 'serper_api_key', None)
+        if exa_key or serper_key:
+            registry.register(WebSearchTool, enabled=True)
+        else:
+            logger.debug("Search API Key not configured, skipping WebSearchTool registration")
+    except Exception as e:
+        logger.warning(f"Failed to register WebSearchTool: {str(e)}")
 

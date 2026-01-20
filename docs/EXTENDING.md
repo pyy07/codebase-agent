@@ -230,6 +230,44 @@ POST /api/v1/tools/{tool_name}/disable
 
 在 `codebase_driven_agent/agent/prompt.py` 中更新工具描述，Agent 会自动获取工具列表并注入到 Prompt 中。
 
+## 内置工具集参考
+
+平台提供了以下内置工具，可以作为实现参考：
+
+### 文件操作工具
+
+- **read**: 读取文件内容，支持行号范围
+  - 参考: `codebase_driven_agent/tools/read_tool.py`
+  - 特点: 二进制文件检测、路径安全验证、编码处理
+
+- **glob**: 文件模式匹配
+  - 参考: `codebase_driven_agent/tools/glob_tool.py`
+  - 特点: 递归搜索、结果排序、结果限制
+
+### 内容搜索工具
+
+- **grep**: 正则表达式搜索
+  - 参考: `codebase_driven_agent/tools/grep_tool.py`
+  - 特点: ripgrep 集成、文件类型过滤、结果格式化
+
+### 命令执行工具
+
+- **bash**: Shell 命令执行
+  - 参考: `codebase_driven_agent/tools/bash_tool.py`
+  - 特点: 安全限制、超时控制、输出截断
+
+### 网络工具
+
+- **webfetch**: 网页内容获取
+  - 参考: `codebase_driven_agent/tools/webfetch_tool.py`
+  - 特点: HTML 解析、文本提取、超时处理
+
+- **websearch**: 网络搜索（可选）
+  - 参考: `codebase_driven_agent/tools/websearch_tool.py`
+  - 特点: 多 API 支持、配置检查、结果格式化
+
+详细文档请参考 [BUILTIN_TOOLS.md](BUILTIN_TOOLS.md)。
+
 ## 数据源扩展流程
 
 ### 日志查询适配器
