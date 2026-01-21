@@ -19,20 +19,22 @@
 
 当前版本专注于**问题分析和错误排查**功能：
 
-- 🤖 **智能分析**: 基于 LangChain Agent 框架，自主调用工具分析问题
+- 🤖 **智能分析**: 基于 LangGraph Agent 框架，自主调用工具分析问题
+- 💬 **交互式分析**: Agent 可以在分析过程中主动请求用户提供额外信息，支持多轮交互
 - 📚 **多数据源**: 支持代码仓库、日志系统（日志易）、数据库查询
 - 🔍 **代码检索**: 基于错误信息智能检索相关代码
 - 📋 **日志分析**: 支持日志易 SPL 查询和本地文件日志查询
 - 🗄️ **数据库查询**: 支持 MySQL、PostgreSQL 等数据库
 - 🛠️ **内置工具集**: 提供文件读取、文件匹配、内容搜索、命令执行、网页获取等实用工具
 - 🌐 **REST API**: 提供同步、异步、流式（SSE）三种接口
-- 💻 **Web UI**: 提供友好的聊天式用户界面（React + TypeScript）
+- 💻 **Web UI**: 提供友好的聊天式用户界面（React + TypeScript），支持实时步骤展示和交互式对话框
 
 ## 核心能力
 
 - 🏗️ **代码库驱动**: 深度理解代码库结构和逻辑，基于代码上下文进行智能分析
 - 🔌 **工具化架构**: 可扩展的工具系统，支持代码、日志、数据库等多种数据源
 - 🧠 **自主决策**: Agent 能够自主选择工具、分析结果、生成解决方案
+- 💬 **交互式协作**: Agent 能够识别信息不足的情况，主动请求用户输入，实现人机协作分析
 - 🔄 **持续扩展**: 架构设计支持未来添加新的工具和功能场景
 
 ## 快速开始
@@ -70,7 +72,7 @@ LOGYI_APIKEY=your-api-key
 
 # 代码仓库配置（可选）
 # Windows 示例（推荐使用正斜杠）:
-CODE_REPO_PATH=F:/gf/code/algorithm
+CODE_REPO_PATH=your-code-repo-path
 # Linux/Mac 示例:
 # CODE_REPO_PATH=/home/user/codebase
 
@@ -149,20 +151,35 @@ codebase_driven_agent/
 ├── config.py            # 配置管理
 ├── agent/               # Agent 核心逻辑
 │   ├── __init__.py
-│   ├── executor.py      # AgentExecutor
-│   └── prompt.py        # Prompt 模板
+│   ├── graph_executor.py    # LangGraph 执行器（核心）
+│   ├── callbacks.py         # LangChain 回调
+│   ├── input_parser.py      # 输入解析器
+│   ├── output_parser.py     # 输出解析器
+│   ├── memory.py            # 记忆管理
+│   ├── prompt.py            # Prompt 模板
+│   ├── session_manager.py   # 会话管理（用户交互）
+│   └── utils.py             # Agent 工具函数
 ├── tools/               # LangChain Tools
 │   ├── __init__.py
-│   ├── code_tool.py
-│   ├── log_tool.py
-│   └── database_tool.py
+│   ├── base.py          # 工具基类
+│   ├── code_tool.py     # 代码相关工具
+│   ├── log_tool.py      # 日志查询工具
+│   ├── database_tool.py # 数据库查询工具
+│   └── registry.py      # 工具注册表
 ├── api/                 # API 路由
 │   ├── __init__.py
-│   ├── routes.py
-│   └── models.py
+│   ├── routes.py        # API 路由定义
+│   ├── models.py        # API 数据模型
+│   ├── middleware.py    # 中间件
+│   └── sse.py           # SSE 事件流处理
 └── utils/               # 工具函数
     ├── __init__.py
-    └── log_query.py
+    ├── cache.py          # 缓存工具
+    ├── database.py       # 数据库工具
+    ├── extractors.py     # 数据提取器
+    ├── logger.py         # 日志工具
+    ├── log_query.py      # 日志查询工具
+    └── metrics.py        # 指标收集
 ```
 
 ## 文档
