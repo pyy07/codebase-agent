@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import { ChatMessage, MessageContent, PlanStep, AnalysisResult } from '../types'
 import { Badge } from '@/components/ui/badge'
+import UnifiedStepsBlock from './UnifiedStepsBlock'
 import './AgentMessage.css'
 
 interface AgentMessageProps {
@@ -30,21 +31,54 @@ export default function AgentMessage({ message }: AgentMessageProps) {
   return (
     <div className="agent-message">
       {message.content.map((content, index) => (
-        <ContentBlock key={index} content={content} isStreaming={message.isStreaming} />
+        <ContentBlock 
+          key={index} 
+          content={content} 
+          isStreaming={message.isStreaming}
+          allContents={message.content}
+        />
       ))}
     </div>
   )
 }
 
-function ContentBlock({ content, isStreaming }: { content: MessageContent; isStreaming?: boolean }) {
+function ContentBlock({ content, isStreaming, allContents }: { content: MessageContent; isStreaming?: boolean; allContents?: MessageContent[] }) {
   switch (content.type) {
     case 'thinking':
       return <ThinkingBlock data={content.data} isStreaming={isStreaming} />
     case 'progress':
       return <ProgressBlock data={content.data} />
     case 'plan':
+      // 尝试查找对应的 step_execution 和 decision_reasoning，如果存在则合并显示
+      const stepExecution = allContents?.find(c => c.type === 'step_execution')
+      // 收集所有推理原因（可能有多个，每个关联到不同的步骤）
+      const allReasonings = allContents
+        ?.filter(c => c.type === 'decision_reasoning')
+        .map(c => c.data) || []
+      if (stepExecution && Array.isArray(stepExecution.data)) {
+        return <UnifiedStepsBlock 
+          planSteps={content.data} 
+          executionSteps={stepExecution.data}
+          decisionReasonings={allReasonings}
+        />
+      }
+      // 如果没有 step_execution，仍然显示 PlanBlock（向后兼容）
       return <PlanBlock steps={content.data} />
+    case 'decision_reasoning':
+      // 如果已经有 plan，则 decision_reasoning 会被 UnifiedStepsBlock 合并显示，这里不单独显示
+      const hasPlanForReasoning = allContents?.some(c => c.type === 'plan')
+      if (hasPlanForReasoning) {
+        return null // UnifiedStepsBlock 会处理显示
+      }
+      // 如果没有 plan，单独显示 decision_reasoning
+      return <DecisionReasoningBlock reasoning={content.data} />
     case 'step_execution':
+      // 如果已经有 plan，则 step_execution 会被 plan 合并显示，这里不单独显示
+      const hasPlan = allContents?.some(c => c.type === 'plan')
+      if (hasPlan) {
+        return null // plan 会处理显示
+      }
+      // 如果没有 plan，单独显示 step_execution
       return <StepExecutionBlock steps={content.data} />
     case 'tool_call':
       return <ToolCallBlock data={content.data} />
@@ -57,6 +91,21 @@ function ContentBlock({ content, isStreaming }: { content: MessageContent; isStr
     default:
       return null
   }
+}
+
+// Decision Reasoning Block
+function DecisionReasoningBlock({ reasoning }: { reasoning: DecisionReasoningData }) {
+  return (
+    <div className="content-block decision-reasoning-block">
+      <div className="block-header">
+        <Lightbulb size={16} className="block-icon reasoning" />
+        <span>{reasoning.action === 'continue' ? '继续分析原因' : '结束分析原因'}</span>
+      </div>
+      <div className="block-body">
+        <p className="reasoning-text">{reasoning.reasoning}</p>
+      </div>
+    </div>
+  )
 }
 
 // Thinking Block

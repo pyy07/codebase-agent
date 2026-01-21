@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { PlanStep, StepExecutionData } from '../types'
+import { PlanStep, StepExecutionData, DecisionReasoningData } from '../types'
 
 export interface SSEMessage {
   event: string
@@ -13,6 +13,7 @@ export interface UseSSEOptions {
   onDone?: () => void
   onPlan?: (steps: PlanStep[]) => void
   onStepExecution?: (stepExecution: StepExecutionData) => void
+  onDecisionReasoning?: (reasoning: DecisionReasoningData) => void
 }
 
 export function useSSE(url: string, body: any, options: UseSSEOptions = {}) {
@@ -148,8 +149,8 @@ export function useSSE(url: string, body: any, options: UseSSEOptions = {}) {
                   // Plan 消息（分析计划）
                   console.log('Plan received:', { event: currentEvent, steps: data.steps, fullData: data })
                   options.onPlan?.(data.steps || [])
-                } else if (currentEvent === 'step_execution' || (data.step && (data.status === 'completed' || data.status === 'failed'))) {
-                  // Step execution 消息（步骤执行结果）
+                } else if (currentEvent === 'step_execution') {
+                  // Step execution 消息（步骤执行结果）- 必须明确匹配 event 类型
                   console.log('Step execution received:', data)
                   const stepExecution: StepExecutionData = {
                     step: data.step,
@@ -162,6 +163,17 @@ export function useSSE(url: string, body: any, options: UseSSEOptions = {}) {
                     timestamp: new Date(),
                   }
                   options.onStepExecution?.(stepExecution)
+                } else if (currentEvent === 'decision_reasoning') {
+                  // Decision reasoning 消息（决策推理原因）- 必须明确匹配 event 类型
+                  console.log('Decision reasoning received:', data)
+                  const reasoningData: DecisionReasoningData = {
+                    reasoning: data.reasoning,
+                    action: data.action,
+                    after_step: data.after_step,  // 在哪个步骤之后
+                    before_steps: data.before_steps,  // 在哪些新步骤之前
+                    timestamp: new Date(),
+                  }
+                  options.onDecisionReasoning?.(reasoningData)
                 } else if (currentEvent === 'progress' || (data.message && data.progress !== undefined)) {
                   // Progress 消息
                   console.log('Progress update:', { 

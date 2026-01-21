@@ -4,7 +4,7 @@ import { ThemeProvider } from './components/theme-provider'
 import { ThemeToggle } from './components/theme-toggle'
 import MessageList from './components/MessageList'
 import ChatInput from './components/ChatInput'
-import { ChatMessage, MessageContent, PlanStep, AttachedFile, AnalysisResult, StepExecutionData } from './types'
+import { ChatMessage, MessageContent, PlanStep, AttachedFile, AnalysisResult, StepExecutionData, DecisionReasoningData } from './types'
 import { useSSE } from './hooks/useSSE'
 import html2canvas from 'html2canvas'
 import './App.css'
@@ -188,16 +188,24 @@ function App() {
     })
 
     // 更新步骤执行状态（根据 progress 推算当前执行的步骤）
-    if (progress > 0) {
+    // 注意：只有当 progress 明确表示步骤进度时才更新，避免心跳消息（progress: 0.5, step: "processing"）覆盖已完成步骤的状态
+    if (progress > 0 && step === 'graph_execution') {
       updateAssistantMessage(contents => {
         const stepExecutionContent = contents.find(c => c.type === 'step_execution')
+        let updatedContents = contents
+        
         if (stepExecutionContent && Array.isArray(stepExecutionContent.data)) {
           const totalSteps = stepExecutionContent.data.length
           const currentStepIndex = Math.floor(progress * totalSteps)
           
-          console.log('[App] Updating step execution:', { totalSteps, currentStepIndex, progress })
+          console.log('[App] Updating step execution:', { totalSteps, currentStepIndex, progress, step })
           
           const updatedSteps = stepExecutionContent.data.map((s: any, index: number) => {
+            // 如果步骤已经有明确的完成状态（completed/failed），不要被 progress 覆盖
+            if (s.status === 'completed' || s.status === 'failed') {
+              return s
+            }
+            // 只更新 pending 或 running 状态的步骤
             if (index < currentStepIndex) {
               return { ...s, status: 'completed' as const }
             } else if (index === currentStepIndex) {
@@ -206,13 +214,37 @@ function App() {
             return s
           })
           
-          return contents.map(c => 
+          updatedContents = updatedContents.map(c => 
             c.type === 'step_execution' 
               ? { type: 'step_execution' as const, data: updatedSteps }
               : c
           )
+          
+          // 同步更新 plan 部分的步骤状态（同样避免覆盖已完成状态）
+          const planContent = updatedContents.find(c => c.type === 'plan')
+          if (planContent && Array.isArray(planContent.data)) {
+            updatedContents = updatedContents.map(c => {
+              if (c.type === 'plan' && Array.isArray(c.data)) {
+                const updatedPlanSteps = c.data.map((step: any, index: number) => {
+                  // 如果步骤已经有明确的完成状态，不要被 progress 覆盖
+                  if (step.status === 'completed' || step.status === 'failed') {
+                    return step
+                  }
+                  // 只更新 pending 或 running 状态的步骤
+                  if (index < currentStepIndex) {
+                    return { ...step, status: 'completed' as const }
+                  } else if (index === currentStepIndex) {
+                    return { ...step, status: 'running' as const }
+                  }
+                  return step
+                })
+                return { type: 'plan' as const, data: updatedPlanSteps }
+              }
+              return c
+            })
+          }
         }
-        return contents
+        return updatedContents
       })
     }
   }, [updateAssistantMessage])
@@ -340,8 +372,12 @@ function App() {
   const handleStepExecution = useCallback((stepExecution: StepExecutionData) => {
     console.log('[App] Step execution received:', stepExecution)
     updateAssistantMessage(contents => {
+      // 更新 step_execution 部分
       const stepExecutionContent = contents.find(c => c.type === 'step_execution')
+      let updatedContents = contents
+      
       if (stepExecutionContent && Array.isArray(stepExecutionContent.data)) {
+        // 更新现有步骤
         const updatedSteps = stepExecutionContent.data.map((s: any) => {
           if (s.step === stepExecution.step) {
             return {
@@ -355,13 +391,71 @@ function App() {
           }
           return s
         })
-        return contents.map(c => 
+        updatedContents = updatedContents.map(c => 
           c.type === 'step_execution' 
             ? { type: 'step_execution' as const, data: updatedSteps }
             : c
         )
+      } else {
+        // 如果没有 step_execution，创建一个新的
+        updatedContents = [...updatedContents, { 
+          type: 'step_execution' as const, 
+          data: [{
+            step: stepExecution.step,
+            action: stepExecution.action,
+            target: stepExecution.target,
+            status: stepExecution.status,
+            result: stepExecution.result,
+            result_truncated: stepExecution.result_truncated,
+            error: stepExecution.error,
+            timestamp: stepExecution.timestamp || new Date(),
+          }]
+        }]
       }
-      return contents
+      
+      // 同步更新 plan 部分的步骤状态
+      const planContent = updatedContents.find(c => c.type === 'plan')
+      if (planContent && Array.isArray(planContent.data)) {
+        updatedContents = updatedContents.map(c => {
+          if (c.type === 'plan' && Array.isArray(c.data)) {
+            const updatedPlanSteps = c.data.map((step: any) => {
+              if (step.step === stepExecution.step) {
+                return {
+                  ...step,
+                  status: stepExecution.status
+                }
+              }
+              return step
+            })
+            return { type: 'plan' as const, data: updatedPlanSteps }
+          }
+          return c
+        })
+      }
+      
+      return updatedContents
+    })
+  }, [updateAssistantMessage])
+
+  const handleDecisionReasoning = useCallback((reasoning: DecisionReasoningData) => {
+    console.log('[App] Decision reasoning received:', reasoning)
+    updateAssistantMessage(contents => {
+      // 支持多个推理原因，每个关联到不同的步骤
+      // 如果已有相同 after_step 的推理原因，则更新；否则添加新的
+      const existingReasoningIndex = contents.findIndex(
+        c => c.type === 'decision_reasoning' && c.data.after_step === reasoning.after_step
+      )
+      if (existingReasoningIndex >= 0) {
+        // 更新现有的推理原因
+        return contents.map((c, idx) => 
+          idx === existingReasoningIndex
+            ? { type: 'decision_reasoning' as const, data: reasoning }
+            : c
+        )
+      } else {
+        // 添加新的推理原因
+        return [...contents, { type: 'decision_reasoning' as const, data: reasoning }]
+      }
     })
   }, [updateAssistantMessage])
 
@@ -376,6 +470,7 @@ function App() {
       onDone: handleDone,
       onPlan: handlePlan,
       onStepExecution: handleStepExecution,
+      onDecisionReasoning: handleDecisionReasoning,
     }
   )
 

@@ -47,6 +47,7 @@ export type MessageContentType =
   | 'tool_result'    // Tool execution result
   | 'progress'       // Progress update
   | 'step_execution' // Step execution details
+  | 'decision_reasoning' // Decision reasoning
   | 'result'         // Final analysis result
   | 'error'          // Error message
 
@@ -79,6 +80,14 @@ export interface StepExecutionData {
   result?: string
   result_truncated?: boolean
   error?: string
+  timestamp?: Date
+}
+
+export interface DecisionReasoningData {
+  reasoning: string
+  action: 'continue' | 'synthesize'
+  after_step?: number  // 在哪个步骤之后显示推理原因
+  before_steps?: number[]  // 在哪些新步骤之前显示推理原因
   timestamp?: Date
 }
 

@@ -49,6 +49,7 @@
 .block-icon.plan { color: var(--success); }
 .block-icon.tool { color: var(--warning); }
 .block-icon.error { color: var(--destructive); }
+.block-icon.reasoning { color: var(--primary); }
 .block-icon.spinning { animation: spin 1s linear infinite; color: var(--primary); }
 
 @keyframes spin {

@@ -325,6 +325,28 @@ async def _execute_analysis_stream(
                             except asyncio.CancelledError:
                                 logger.info("Task cancelled during plan message")
                                 break
+                        elif event == "step_execution":
+                            try:
+                                logger.info(f"Sending step_execution for step {data.get('step')} to client")
+                                yield SSEMessage.format("step_execution", data)
+                                logger.debug(f"Step execution message sent for step {data.get('step')}")
+                            except GeneratorExit:
+                                logger.info("Client disconnected during step_execution message")
+                                raise
+                            except asyncio.CancelledError:
+                                logger.info("Task cancelled during step_execution message")
+                                break
+                        elif event == "decision_reasoning":
+                            try:
+                                logger.info(f"Sending decision_reasoning to client: {data.get('reasoning', '')[:100]}")
+                                yield SSEMessage.format("decision_reasoning", data)
+                                logger.debug("Decision reasoning message sent")
+                            except GeneratorExit:
+                                logger.info("Client disconnected during decision_reasoning message")
+                                raise
+                            except asyncio.CancelledError:
+                                logger.info("Task cancelled during decision_reasoning message")
+                                break
                         elif event == "error":
                             try:
                                 yield SSEMessage.error(data.get("error", "Unknown error"))
@@ -384,6 +406,10 @@ async def _execute_analysis_stream(
                             yield SSEMessage.format("done", data)
                         elif event == "plan":
                             yield SSEMessage.plan(data.get("steps", []))
+                        elif event == "step_execution":
+                            yield SSEMessage.format("step_execution", data)
+                        elif event == "decision_reasoning":
+                            yield SSEMessage.format("decision_reasoning", data)
                         elif event == "progress":
                             yield SSEMessage.progress(
                                 data.get("message", ""),

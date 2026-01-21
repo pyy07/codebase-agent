@@ -340,16 +340,30 @@ class GraphExecutor:
                 
                 logger.info(f"Decision node: Plan expanded from {len(plan_steps)} to {len(updated_plan_steps)} steps")
                 
-                # 发送更新后的 plan 给前端
+                # 发送更新后的 plan 和推理原因给前端
                 if self.message_queue:
                     try:
+                        # 发送推理原因（关联到当前步骤之后，新步骤之前）
+                        # 推理原因应该显示在当前步骤（current_step）之后，新步骤（从 len(plan_steps)+1 开始）之前
+                        self.message_queue.put_nowait({
+                            "event": "decision_reasoning",
+                            "data": {
+                                "reasoning": reasoning,
+                                "action": action,
+                                "after_step": current_step,  # 在哪个步骤之后
+                                "before_steps": [len(plan_steps) + i + 1 for i in range(len(next_steps))],  # 在哪些新步骤之前
+                            }
+                        })
+                        logger.info(f"Decision node: Reasoning sent to frontend: after_step={current_step}, before_steps={[len(plan_steps) + i + 1 for i in range(len(next_steps))]}")
+                        
+                        # 发送更新后的 plan
                         self.message_queue.put_nowait({
                             "event": "plan",
                             "data": {"steps": updated_plan_steps}
                         })
                         logger.info(f"Decision node: Updated plan sent to frontend")
                     except Exception as e:
-                        logger.error(f"Failed to queue updated plan: {e}")
+                        logger.error(f"Failed to queue updated plan/reasoning: {e}")
                 
                 return {
                     "should_continue": True,
@@ -1015,6 +1029,8 @@ class GraphExecutor:
     def _generate_simplified_result(self, input_text: str, step_results: List[Dict]) -> Dict[str, Any]:
         """当 prompt 超长时，基于已有步骤结果生成简化结论
         
+        即使上下文过长，也尝试调用 LLM 进行总结，而不是直接拼接工具输出。
+        
         Args:
             input_text: 原始输入
             step_results: 已执行的步骤结果列表
@@ -1028,41 +1044,121 @@ class GraphExecutor:
         successful_steps = [r for r in step_results if r.get("status") == "completed"]
         failed_steps = [r for r in step_results if r.get("status") == "failed"]
         
-        # 提取关键信息
-        root_cause_parts = []
-        suggestions = []
+        # 提取关键信息摘要（限制长度，用于构建简短的 prompt）
+        key_findings = []
+        for step in successful_steps[:5]:  # 最多取前5个步骤
+            action = step.get('action', '')
+            result_str = str(step.get("result", ""))
+            # 提取关键信息：文件路径、行号、错误信息等
+            import re
+            # 提取文件路径和行号
+            file_match = re.search(r'([\w/\\]+\.(?:py|js|ts|java|cpp|h|c|hpp|go|rs))[:\s]+Line\s+(\d+)', result_str)
+            if file_match:
+                file_path = file_match.group(1)
+                line_num = file_match.group(2)
+                key_findings.append(f"- {action}: 在 {file_path} 第 {line_num} 行")
+            else:
+                # 如果没有文件路径，提取前100个字符
+                summary = result_str[:100].replace('\n', ' ').strip()
+                if summary:
+                    key_findings.append(f"- {action}: {summary}...")
         
-        if failed_steps:
-            root_cause_parts.append(f"部分步骤执行失败（{len(failed_steps)}/{len(step_results)}），可能影响分析的完整性。")
-            suggestions.append("建议：重新运行分析，或尝试更具体的搜索条件。")
+        # 构建简短的 prompt，只包含关键信息
+        simplified_prompt = f"""基于以下执行步骤的结果，分析问题的根本原因并提供修复建议。
+
+原始问题：
+{input_text[:500]}
+
+执行步骤摘要：
+{chr(10).join(key_findings[:10])}  # 最多10条
+
+请以以下 JSON 格式输出分析结果（即使信息不完整，也要基于已有信息进行分析）：
+```json
+{{
+  "root_cause": "问题的根本原因分析（基于已执行的步骤，说明：1) 错误发生的具体位置 2) 为什么会出现这个错误 3) 根本原因是什么。即使信息不完整，也要给出合理的分析）",
+  "suggestions": [
+    "建议1：...",
+    "建议2：..."
+  ],
+  "confidence": 0.4
+}}
+```
+
+注意：
+- 即使信息不完整，也要基于已有步骤结果进行分析
+- 根因分析应该是结构化的、易于理解的叙述，而不是工具输出的简单拼接
+- 使用 Markdown 格式（如列表、代码块）来组织信息
+- 如果某些关键信息缺失，在分析中明确说明"""
         
-        if successful_steps:
-            # 从成功步骤中提取关键信息
-            for step in successful_steps[:3]:  # 只取前3个成功步骤
-                result_str = str(step.get("result", ""))[:200]
-                if result_str:
-                    root_cause_parts.append(f"步骤 '{step.get('action', '')}' 的结果：{result_str}...")
-        
-        # 构建根因分析
-        if root_cause_parts:
-            root_cause = "由于对话上下文过长，已基于已执行的步骤生成简化分析。\n\n" + "\n".join(root_cause_parts)
-        else:
-            root_cause = "由于对话上下文过长，无法生成完整分析。建议重新运行分析或使用更具体的查询条件。"
-        
-        # 如果没有建议，添加默认建议
-        if not suggestions:
-            suggestions = [
-                "建议：重新运行分析，使用更具体的查询条件以减少上下文长度。",
-                "建议：分步骤分析，先解决部分问题，再逐步深入。",
-            ]
-        
-        return {
-            "root_cause": root_cause,
-            "suggestions": suggestions,
-            "confidence": 0.3,  # 降低置信度，因为这是简化结果
-            "related_code": [],
-            "related_logs": [],
-        }
+        try:
+            # 尝试调用 LLM 进行总结（使用简短的 prompt）
+            from langchain_core.messages import HumanMessage
+            messages = [HumanMessage(content=simplified_prompt)]
+            response = self.llm.invoke(messages)
+            
+            # 解析 LLM 响应
+            final_result = self._parse_synthesis_result(response.content)
+            
+            # 如果解析失败，使用默认格式
+            if not final_result.get("root_cause"):
+                raise ValueError("Failed to parse LLM response")
+            
+            # 添加说明，降低置信度
+            final_result["confidence"] = min(final_result.get("confidence", 0.4), 0.4)
+            if "由于对话上下文过长" not in final_result.get("root_cause", ""):
+                final_result["root_cause"] = "⚠️ **注意**：由于对话上下文过长，以下分析基于已执行步骤的摘要信息。\n\n" + final_result.get("root_cause", "")
+            
+            logger.info("Successfully generated simplified result using LLM")
+            return final_result
+            
+        except Exception as e:
+            logger.warning(f"Failed to generate simplified result using LLM: {str(e)}, falling back to basic summary")
+            
+            # Fallback: 如果 LLM 调用失败，生成基本的摘要
+            root_cause_parts = []
+            suggestions = []
+            
+            if failed_steps:
+                root_cause_parts.append(f"⚠️ 部分步骤执行失败（{len(failed_steps)}/{len(step_results)}），可能影响分析的完整性。")
+                suggestions.append("建议：重新运行分析，或尝试更具体的搜索条件。")
+            
+            if successful_steps:
+                root_cause_parts.append("## 已执行的步骤摘要\n\n")
+                for i, step in enumerate(successful_steps[:5], 1):
+                    action = step.get('action', '')
+                    result_str = str(step.get("result", ""))
+                    # 提取关键信息
+                    import re
+                    file_match = re.search(r'([\w/\\]+\.(?:py|js|ts|java|cpp|h|c|hpp|go|rs))[:\s]+Line\s+(\d+)', result_str)
+                    if file_match:
+                        file_path = file_match.group(1)
+                        line_num = file_match.group(2)
+                        root_cause_parts.append(f"{i}. **{action}**: 在 `{file_path}` 第 {line_num} 行")
+                    else:
+                        summary = result_str[:150].replace('\n', ' ').strip()
+                        if summary:
+                            root_cause_parts.append(f"{i}. **{action}**: {summary}...")
+            
+            # 构建根因分析
+            if root_cause_parts:
+                root_cause = "⚠️ **注意**：由于对话上下文过长，以下分析基于已执行步骤的摘要信息。\n\n" + "\n\n".join(root_cause_parts)
+            else:
+                root_cause = "由于对话上下文过长，无法生成完整分析。建议重新运行分析或使用更具体的查询条件。"
+            
+            # 如果没有建议，添加默认建议
+            if not suggestions:
+                suggestions = [
+                    "建议：重新运行分析，使用更具体的查询条件以减少上下文长度。",
+                    "建议：分步骤分析，先解决部分问题，再逐步深入。",
+                ]
+            
+            return {
+                "root_cause": root_cause,
+                "suggestions": suggestions,
+                "confidence": 0.3,  # 降低置信度，因为这是简化结果
+                "related_code": [],
+                "related_logs": [],
+            }
 
     def _has_enough_information(self, state: AgentState) -> bool:
         """判断是否已经有足够的信息来解决问题"""

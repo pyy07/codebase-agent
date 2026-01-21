@@ -1,0 +1,496 @@
+.unified-steps-block {
+  margin: 16px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 8px);
+  background: var(--card);
+  overflow: hidden;
+}
+
+.unified-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  width: 100%;
+  background: var(--background-secondary);
+  border: none;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  color: var(--foreground);
+}
+
+.unified-header:hover {
+  background: var(--accent);
+}
+
+.unified-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.unified-icon {
+  color: var(--icon-color, #6366f1);
+}
+
+.unified-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary, #111827);
+}
+
+.new-steps-badge {
+  font-size: 11px;
+  padding: 2px 6px;
+  animation: pulse 2s infinite;
+}
+
+.running-badge {
+  font-size: 11px;
+  padding: 2px 6px;
+  background: var(--running-bg, #fef3c7);
+  color: var(--running-text, #92400e);
+  border-color: var(--running-border, #fbbf24);
+}
+
+.unified-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.progress-badge {
+  font-size: 12px;
+  padding: 4px 8px;
+  min-width: 50px;
+  text-align: center;
+}
+
+.mini-progress-bar {
+  width: 60px;
+  height: 6px;
+  background: var(--muted);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.mini-progress-fill {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.3s ease;
+}
+
+.unified-content {
+  padding: 16px;
+}
+
+/* 步骤之间的推理原因 */
+.decision-reasoning-item {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+}
+
+.decision-reasoning-section {
+  margin: 0;
+  padding: 12px;
+  background: var(--muted);
+  border-radius: 6px;
+  border-left: 3px solid var(--primary);
+}
+
+.reasoning-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.reasoning-icon {
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.reasoning-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--foreground);
+}
+
+.reasoning-content {
+  font-size: 13px;
+  color: var(--muted-foreground);
+  line-height: 1.6;
+  padding-left: 24px;
+}
+
+.unified-steps-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.unified-step-item {
+  display: flex;
+  gap: 12px;
+  position: relative;
+  padding: 12px;
+  border-radius: 6px;
+  background: var(--step-bg, #ffffff);
+  border: 1px solid var(--step-border, #e5e7eb);
+  transition: all 0.2s;
+}
+
+.unified-step-item:hover {
+  background: var(--step-hover-bg, #f9fafb);
+  border-color: var(--step-hover-border, #d1d5db);
+}
+
+.unified-step-item.step-completed {
+  border-color: var(--completed-border, #10b981);
+  background: var(--completed-bg, #f0fdf4);
+}
+
+.unified-step-item.step-running {
+  border-color: var(--running-border, #f59e0b);
+  background: var(--running-bg, #fffbeb);
+  animation: pulse-border 2s infinite;
+}
+
+.unified-step-item.step-failed {
+  border-color: var(--failed-border, #ef4444);
+  background: var(--failed-bg, #fef2f2);
+}
+
+.unified-step-item.new-step {
+  animation: slideIn 0.3s ease;
+}
+
+.step-status-column {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.status-icon {
+  flex-shrink: 0;
+}
+
+.status-icon.completed {
+  color: var(--success);
+}
+
+.status-icon.running {
+  color: var(--warning);
+  animation: spin 1s linear infinite;
+}
+
+.status-icon.failed {
+  color: var(--destructive);
+}
+
+.status-icon.pending {
+  color: var(--muted-foreground);
+}
+
+.step-connector {
+  width: 2px;
+  flex: 1;
+  min-height: 20px;
+  background: var(--border);
+  margin-top: 4px;
+}
+
+.step-connector.completed {
+  background: var(--success);
+}
+
+.step-content-column {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.step-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.step-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.step-number {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary, #111827);
+  min-width: 50px;
+}
+
+.new-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+}
+
+.step-action {
+  font-size: 14px;
+  color: var(--foreground);
+  flex: 1;
+}
+
+.status-badge {
+  font-size: 11px;
+  padding: 4px 8px;
+  flex-shrink: 0;
+}
+
+.status-badge.completed {
+  background: var(--completed-bg, #d1fae5);
+  color: var(--completed-text, #065f46);
+  border-color: var(--completed-border, #10b981);
+}
+
+.status-badge.running {
+  background: var(--running-bg, #fef3c7);
+  color: var(--running-text, #92400e);
+  border-color: var(--running-border, #f59e0b);
+}
+
+.status-badge.failed {
+  background: var(--failed-bg, #fee2e2);
+  color: var(--failed-text, #991b1b);
+  border-color: var(--failed-border, #ef4444);
+}
+
+.status-badge.pending {
+  background: var(--pending-bg, #f3f4f6);
+  color: var(--pending-text, #6b7280);
+  border-color: var(--pending-border, #9ca3af);
+}
+
+.step-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--muted);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.target-arrow {
+  color: var(--muted-foreground);
+}
+
+.target-code {
+  font-family: 'JetBrains Mono', 'Monaco', 'Menlo', 'Courier New', monospace;
+  font-size: 12px;
+  color: var(--foreground);
+  background: transparent;
+  padding: 0;
+}
+
+.step-result-section {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.step-result-container,
+.step-error-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.result-toggle-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--toggle-bg, #f9fafb);
+  border: 1px solid var(--toggle-border, #e5e7eb);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 12px;
+  color: var(--text-secondary, #6b7280);
+}
+
+.result-toggle-button:hover {
+  background: var(--toggle-hover-bg, #f3f4f6);
+  border-color: var(--toggle-hover-border, #d1d5db);
+}
+
+.result-label {
+  font-weight: 500;
+  color: var(--text-primary, #111827);
+}
+
+.error-icon {
+  color: var(--failed-color, #ef4444);
+}
+
+.truncated-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  margin-left: auto;
+}
+
+/* 完整展开状态：使用代码块样式（深色背景，亮色文字） */
+.result-content:not(.preview) {
+  margin: 0;
+  padding: 10px;
+  background: var(--code-bg, #1e1e1e);
+  color: #e5e7eb !important; /* 使用亮色文字，确保在深色背景上清晰可见 */
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', 'Monaco', 'Menlo', 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 深色模式下的展开样式 */
+.dark .result-content:not(.preview) {
+  background: var(--code-bg, #0d1117);
+  color: #c9d1d9 !important; /* GitHub 风格的代码文字颜色 */
+}
+
+/* 预览状态（收起时）：使用浅色背景和深色文字，确保高对比度 */
+.result-content.preview {
+  margin: 0 !important;
+  padding: 10px !important;
+  max-height: 200px !important;
+  overflow-y: auto !important;
+  opacity: 1 !important;
+  position: relative !important;
+  display: block !important;
+  /* 使用浅色背景和深色文字，确保在任何主题下都有良好的对比度 */
+  background: #f3f4f6 !important; /* 强制使用浅色背景 */
+  color: #111827 !important; /* 强制使用深色文字 */
+  border: 1px solid #e5e7eb !important;
+  border-radius: 4px !important;
+  font-family: 'JetBrains Mono', 'Monaco', 'Menlo', 'Courier New', monospace !important;
+  font-size: 12px !important;
+  line-height: 1.5 !important;
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+  font-weight: 400 !important;
+}
+
+/* 深色模式下的预览样式 */
+.dark .result-content.preview {
+  background: #1e293b !important; /* 深色模式下的浅色背景 */
+  color: #e2e8f0 !important; /* 深色模式下的亮色文字 */
+  border-color: #334155 !important;
+}
+
+/* 错误预览状态（收起时） */
+.error-content.preview {
+  margin: 0 !important;
+  padding: 10px !important;
+  max-height: 200px !important;
+  overflow: hidden !important; /* 收起时隐藏超出内容 */
+  opacity: 1 !important;
+  position: relative !important;
+  display: block !important;
+  /* 错误预览使用浅红色背景和深红色文字 */
+  background: #fef2f2 !important; /* 强制使用浅红色背景 */
+  color: #991b1b !important; /* 强制使用深红色文字 */
+  border: 1px solid #ef4444 !important;
+  border-radius: 4px !important;
+  font-family: 'JetBrains Mono', 'Monaco', 'Menlo', 'Courier New', monospace !important;
+  font-size: 12px !important;
+  line-height: 1.5 !important;
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+  font-weight: 400 !important;
+  text-overflow: ellipsis !important; /* 文本溢出显示省略号 */
+}
+
+/* 深色模式下的错误预览样式 */
+.dark .error-content.preview {
+  background: rgba(239, 68, 68, 0.15) !important;
+  color: #fecaca !important;
+  border-color: var(--destructive, #ef4444);
+}
+
+/* 完整展开的错误样式 */
+.error-content:not(.preview) {
+  margin: 0;
+  padding: 10px;
+  background: var(--error-bg, #7f1d1d);
+  color: #fecaca !important; /* 确保错误文字清晰可见 */
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', 'Monaco', 'Menlo', 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.preview-hint {
+  display: block;
+  margin-top: 8px;
+  padding: 4px 8px;
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--primary);
+  border-radius: 4px;
+  font-size: 11px;
+  font-style: italic;
+}
+
+/* 删除重复定义，错误样式已在 .error-content:not(.preview) 中定义 */
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+@keyframes pulse-border {
+  0%, 100% {
+    border-color: var(--running-border, #f59e0b);
+  }
+  50% {
+    border-color: var(--running-border-light, #fbbf24);
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Dark mode support is handled by CSS variables */
