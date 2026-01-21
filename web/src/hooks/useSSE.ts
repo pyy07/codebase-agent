@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { PlanStep, StepExecutionData, DecisionReasoningData } from '../types'
+import { PlanStep, StepExecutionData, DecisionReasoningData, UserInputRequestData, UserReplyData } from '../types'
 
 export interface SSEMessage {
   event: string
@@ -14,6 +14,8 @@ export interface UseSSEOptions {
   onPlan?: (steps: PlanStep[]) => void
   onStepExecution?: (stepExecution: StepExecutionData) => void
   onDecisionReasoning?: (reasoning: DecisionReasoningData) => void
+  onUserInputRequest?: (request: UserInputRequestData) => void
+  onUserReply?: (reply: UserReplyData) => void
 }
 
 export function useSSE(url: string, body: any, options: UseSSEOptions = {}) {
@@ -174,6 +176,25 @@ export function useSSE(url: string, body: any, options: UseSSEOptions = {}) {
                     timestamp: new Date(),
                   }
                   options.onDecisionReasoning?.(reasoningData)
+                } else if (currentEvent === 'user_input_request') {
+                  // User input request 消息（Agent 请求用户输入）
+                  console.log('User input request received:', data)
+                  const requestData: UserInputRequestData = {
+                    request_id: data.request_id,
+                    question: data.question,
+                    context: data.context,
+                    timestamp: new Date(),
+                  }
+                  options.onUserInputRequest?.(requestData)
+                } else if (currentEvent === 'user_reply') {
+                  // User reply 消息（用户回复）
+                  console.log('User reply received:', data)
+                  const replyData: UserReplyData = {
+                    request_id: data.request_id,
+                    reply: data.reply,
+                    timestamp: new Date(),
+                  }
+                  options.onUserReply?.(replyData)
                 } else if (currentEvent === 'progress' || (data.message && data.progress !== undefined)) {
                   // Progress 消息
                   console.log('Progress update:', { 

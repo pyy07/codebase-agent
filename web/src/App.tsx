@@ -4,7 +4,7 @@ import { ThemeProvider } from './components/theme-provider'
 import { ThemeToggle } from './components/theme-toggle'
 import MessageList from './components/MessageList'
 import ChatInput from './components/ChatInput'
-import { ChatMessage, MessageContent, PlanStep, AttachedFile, AnalysisResult, StepExecutionData, DecisionReasoningData } from './types'
+import { ChatMessage, MessageContent, PlanStep, AttachedFile, AnalysisResult, StepExecutionData, DecisionReasoningData, UserInputRequestData, UserReplyData } from './types'
 import { useSSE } from './hooks/useSSE'
 import html2canvas from 'html2canvas'
 import './App.css'
@@ -153,9 +153,15 @@ function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [])
 
+  // 只在消息数量变化时滚动，而不是每次 messages 引用变化时滚动
+  const messagesLengthRef = useRef(messages.length)
   useEffect(() => {
-    scrollToBottom()
-  }, [messages, scrollToBottom])
+    // 只在消息数量真正增加时才滚动
+    if (messages.length > messagesLengthRef.current) {
+      messagesLengthRef.current = messages.length
+      scrollToBottom()
+    }
+  }, [messages.length, scrollToBottom])
 
   // Helper to update the current assistant message
   const updateAssistantMessage = useCallback((updater: (contents: MessageContent[]) => MessageContent[]) => {
@@ -173,7 +179,30 @@ function App() {
   // SSE Handlers
   const handleProgress = useCallback((message: string, progress: number, step?: string) => {
     console.log('[App] Progress update:', { message, progress, step })
+    
+    // 如果分析已完成（有 result 内容），忽略心跳消息（step: "waiting"）
+    const messageId = currentAssistantMessageRef.current
+    if (messageId) {
+      const currentMessage = messages.find(msg => msg.id === messageId)
+      if (currentMessage) {
+        const hasResult = currentMessage.content.some(c => c.type === 'result')
+        const isHeartbeat = step === 'waiting' || (message === '等待中...' && progress === 0.5)
+        
+        if (hasResult && isHeartbeat) {
+          console.log('[App] Ignoring heartbeat progress after analysis completed')
+          return
+        }
+      }
+    }
+    
     updateAssistantMessage(contents => {
+      // 如果已有 result，不再更新进度条
+      const hasResult = contents.some(c => c.type === 'result')
+      if (hasResult) {
+        console.log('[App] Analysis already completed, ignoring progress update')
+        return contents
+      }
+      
       // Update or add progress content
       const hasProgress = contents.some(c => c.type === 'progress')
       if (hasProgress) {
@@ -247,7 +276,7 @@ function App() {
         return updatedContents
       })
     }
-  }, [updateAssistantMessage])
+  }, [updateAssistantMessage, messages])
 
   const handlePlan = useCallback((steps: PlanStep[]) => {
     console.log('[App] Received plan with steps:', steps)
@@ -360,12 +389,18 @@ function App() {
   }, [updateAssistantMessage])
 
   const handleDone = useCallback(() => {
+    console.log('[App] Done event received, marking analysis as complete')
     setIsProcessing(false)
     const messageId = currentAssistantMessageRef.current
     if (messageId) {
-      setMessages(prev => prev.map(msg => 
-        msg.id === messageId ? { ...msg, isStreaming: false } : msg
-      ))
+      setMessages(prev => prev.map(msg => {
+        if (msg.id === messageId) {
+          // 移除进度条，因为分析已完成
+          const updatedContents = msg.content.filter(c => c.type !== 'progress')
+          return { ...msg, isStreaming: false, content: updatedContents }
+        }
+        return msg
+      }))
     }
   }, [])
 
@@ -459,6 +494,71 @@ function App() {
     })
   }, [updateAssistantMessage])
 
+  const handleUserInputRequest = useCallback((request: UserInputRequestData) => {
+    console.log('[App] User input request received:', request)
+    updateAssistantMessage(contents => {
+      // 添加用户输入请求到消息内容
+      return [...contents, { type: 'user_input_request' as const, data: request }]
+    })
+  }, [updateAssistantMessage])
+
+  const handleUserReply = useCallback((reply: UserReplyData) => {
+    console.log('[App] User reply received:', reply)
+    updateAssistantMessage(contents => {
+      // 添加用户回复到消息内容
+      return [...contents, { type: 'user_reply' as const, data: reply }]
+    })
+  }, [updateAssistantMessage])
+
+  // 提交用户回复到后端
+  const submitUserReply = useCallback(async (requestId: string, reply: string) => {
+    // 立即显示用户回复，不等待后端响应
+    const isSkip = reply === '__SKIP__'
+    handleUserReply({
+      request_id: requestId,
+      reply: isSkip ? '[已跳过，Agent 将基于已有信息得出结论]' : reply,
+      timestamp: new Date(),
+    })
+    
+    // 在后台发送请求，不阻塞 UI
+    const apiKey = localStorage.getItem('apiKey')
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    }
+    if (apiKey) {
+      headers['X-API-Key'] = apiKey
+    }
+
+    const endpoint = isSkip ? '/api/v1/analyze/skip' : '/api/v1/analyze/reply'
+    const body = isSkip 
+      ? JSON.stringify({ request_id: requestId })
+      : JSON.stringify({ request_id: requestId, reply })
+
+    // 异步发送请求，不等待响应（后端会在后台处理并通过 SSE 流式返回结果）
+    fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body,
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          const errorData = await response.json()
+          console.error(`[App] User ${isSkip ? 'skip' : 'reply'} failed:`, errorData)
+          handleError(errorData.detail || (isSkip ? '跳过失败' : '提交回复失败'))
+        } else {
+          const result = await response.json()
+          console.log(`[App] User ${isSkip ? 'skip' : 'reply'} submitted successfully:`, result)
+        }
+      })
+      .catch((error) => {
+        console.error('[App] Error submitting user reply:', error)
+        handleError(error instanceof Error ? error.message : '提交回复失败')
+      })
+    
+    // 立即返回，不等待后端处理
+    return Promise.resolve({ success: true })
+  }, [handleUserReply, handleError])
+
   // SSE Hook
   const { error: sseError } = useSSE(
     useStreaming && sseBody ? '/api/v1/analyze/stream' : '',
@@ -471,6 +571,8 @@ function App() {
       onPlan: handlePlan,
       onStepExecution: handleStepExecution,
       onDecisionReasoning: handleDecisionReasoning,
+      onUserInputRequest: handleUserInputRequest,
+      onUserReply: handleUserReply,
     }
   )
 
@@ -580,7 +682,7 @@ function App() {
         {/* Messages Area */}
         <main className="chat-main">
           <div className="messages-container" ref={messagesContainerRef}>
-            <MessageList messages={messages} />
+            <MessageList messages={messages} onSubmitUserReply={submitUserReply} />
             <div ref={messagesEndRef} />
           </div>
         </main>

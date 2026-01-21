@@ -63,3 +63,26 @@ class AsyncTaskResponse(BaseModel):
     status: str = Field(..., description="任务状态：'pending', 'running', 'completed', 'failed'")
     message: str = Field(..., description="响应消息")
 
+
+class UserReplyRequest(BaseModel):
+    """用户回复请求模型"""
+    request_id: str = Field(..., description="请求ID（来自 user_input_request 事件）")
+    reply: str = Field(..., description="用户的回复内容")
+
+
+class UserReplyResponse(BaseModel):
+    """用户回复响应模型"""
+    success: bool = Field(..., description="是否成功")
+    message: str = Field(..., description="响应消息")
+
+
+class SkipUserInputRequest(BaseModel):
+    """跳过用户输入请求模型"""
+    request_id: str = Field(..., description="请求ID（来自 user_input_request 事件）")
+
+
+class SkipUserInputResponse(BaseModel):
+    """跳过用户输入响应模型"""
+    success: bool = Field(..., description="是否成功")
+    message: str = Field(..., description="响应消息")
+

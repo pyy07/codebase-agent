@@ -48,6 +48,8 @@ export type MessageContentType =
   | 'progress'       // Progress update
   | 'step_execution' // Step execution details
   | 'decision_reasoning' // Decision reasoning
+  | 'user_input_request' // Agent requests user input
+  | 'user_reply'     // User reply to agent's request
   | 'result'         // Final analysis result
   | 'error'          // Error message
 
@@ -88,6 +90,19 @@ export interface DecisionReasoningData {
   action: 'continue' | 'synthesize'
   after_step?: number  // 在哪个步骤之后显示推理原因
   before_steps?: number[]  // 在哪些新步骤之前显示推理原因
+  timestamp?: Date
+}
+
+export interface UserInputRequestData {
+  request_id: string
+  question: string
+  context?: string
+  timestamp?: Date
+}
+
+export interface UserReplyData {
+  request_id: string
+  reply: string
   timestamp?: Date
 }
 

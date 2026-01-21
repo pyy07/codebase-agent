@@ -5,9 +5,10 @@ import './MessageList.css'
 
 interface MessageListProps {
   messages: ChatMessage[]
+  onSubmitUserReply?: (requestId: string, reply: string) => Promise<void>
 }
 
-export default function MessageList({ messages }: MessageListProps) {
+export default function MessageList({ messages, onSubmitUserReply }: MessageListProps) {
   if (messages.length === 0) {
     return (
       <div className="empty-chat">
@@ -52,7 +53,7 @@ export default function MessageList({ messages }: MessageListProps) {
             {message.role === 'user' ? (
               <UserMessageContent message={message} />
             ) : (
-              <AgentMessage message={message} />
+              <AgentMessage message={message} onSubmitUserReply={onSubmitUserReply} />
             )}
           </div>
         </div>

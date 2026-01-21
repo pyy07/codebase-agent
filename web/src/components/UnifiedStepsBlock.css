@@ -493,4 +493,199 @@
   }
 }
 
+/* User Interaction Styles */
+.step-user-interaction {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--muted, #f3f4f6);
+  border: 1px solid var(--border, #e5e7eb);
+  border-left: 3px solid var(--primary, #3b82f6);
+  border-radius: 6px;
+}
+
+.dark .step-user-interaction {
+  background: var(--muted, #1f2937);
+  border-color: var(--border, #374151);
+}
+
+.user-interaction-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.interaction-icon {
+  color: var(--primary, #3b82f6);
+}
+
+.interaction-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary, #111827);
+}
+
+.dark .interaction-title {
+  color: var(--text-primary, #f9fafb);
+}
+
+.user-interaction-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.interaction-question,
+.interaction-context {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.interaction-question strong,
+.interaction-context strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--text-secondary, #6b7280);
+}
+
+.dark .interaction-question strong,
+.dark .interaction-context strong {
+  color: var(--text-secondary, #9ca3af);
+}
+
+.interaction-question p,
+.interaction-context p {
+  margin: 0;
+  color: var(--text-primary, #111827);
+}
+
+.dark .interaction-question p,
+.dark .interaction-context p {
+  color: var(--text-primary, #f9fafb);
+}
+
+.user-reply-display {
+  padding: 8px 12px;
+  background: var(--background, #ffffff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.dark .user-reply-display {
+  background: var(--background, #111827);
+  border-color: var(--border, #374151);
+}
+
+.user-reply-display strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--text-secondary, #6b7280);
+}
+
+.dark .user-reply-display strong {
+  color: var(--text-secondary, #9ca3af);
+}
+
+.user-reply-display p {
+  margin: 0;
+  color: var(--text-primary, #111827);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dark .user-reply-display p {
+  color: var(--text-primary, #f9fafb);
+}
+
+.user-interaction-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.interaction-button {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 4px;
+  border: 1px solid;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.interaction-button.primary {
+  background: var(--primary, #3b82f6);
+  color: white;
+  border-color: var(--primary, #3b82f6);
+}
+
+.interaction-button.primary:hover {
+  background: var(--primary-hover, #2563eb);
+  border-color: var(--primary-hover, #2563eb);
+}
+
+.interaction-button.secondary {
+  background: var(--background, #ffffff);
+  color: var(--text-primary, #111827);
+  border-color: var(--border, #e5e7eb);
+}
+
+.dark .interaction-button.secondary {
+  background: var(--background, #111827);
+  color: var(--text-primary, #f9fafb);
+  border-color: var(--border, #374151);
+}
+
+.interaction-button.secondary:hover {
+  background: var(--muted, #f3f4f6);
+  border-color: var(--border-hover, #d1d5db);
+}
+
+.dark .interaction-button.secondary:hover {
+  background: var(--muted, #1f2937);
+  border-color: var(--border-hover, #4b5563);
+}
+
+.interaction-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.user-interaction-pending {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--muted, #f3f4f6);
+  border: 1px dashed var(--border, #e5e7eb);
+  border-radius: 4px;
+  margin-top: 8px;
+}
+
+.dark .user-interaction-pending {
+  background: var(--muted, #1f2937);
+  border-color: var(--border, #374151);
+}
+
+.user-interaction-pending .interaction-icon {
+  color: var(--primary, #3b82f6);
+  flex-shrink: 0;
+}
+
+.pending-text {
+  font-size: 13px;
+  color: var(--text-secondary, #6b7280);
+  font-style: italic;
+}
+
+.dark .pending-text {
+  color: var(--text-secondary, #9ca3af);
+}
+
 /* Dark mode support is handled by CSS variables */

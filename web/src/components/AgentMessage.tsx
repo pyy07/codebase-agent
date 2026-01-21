@@ -18,16 +18,19 @@ import {
   FileCode,
   Clock
 } from 'lucide-react'
-import { ChatMessage, MessageContent, PlanStep, AnalysisResult } from '../types'
+import { ChatMessage, MessageContent, PlanStep, AnalysisResult, UserInputRequestData, UserReplyData } from '../types'
 import { Badge } from '@/components/ui/badge'
 import UnifiedStepsBlock from './UnifiedStepsBlock'
+import UserInputRequest from './UserInputRequest'
+import UserReply from './UserReply'
 import './AgentMessage.css'
 
 interface AgentMessageProps {
   message: ChatMessage
+  onSubmitUserReply?: (requestId: string, reply: string) => Promise<void>
 }
 
-export default function AgentMessage({ message }: AgentMessageProps) {
+export default function AgentMessage({ message, onSubmitUserReply }: AgentMessageProps) {
   return (
     <div className="agent-message">
       {message.content.map((content, index) => (
@@ -36,13 +39,14 @@ export default function AgentMessage({ message }: AgentMessageProps) {
           content={content} 
           isStreaming={message.isStreaming}
           allContents={message.content}
+          onSubmitUserReply={onSubmitUserReply}
         />
       ))}
     </div>
   )
 }
 
-function ContentBlock({ content, isStreaming, allContents }: { content: MessageContent; isStreaming?: boolean; allContents?: MessageContent[] }) {
+function ContentBlock({ content, isStreaming, allContents, onSubmitUserReply }: { content: MessageContent; isStreaming?: boolean; allContents?: MessageContent[]; onSubmitUserReply?: (requestId: string, reply: string) => Promise<void> }) {
   switch (content.type) {
     case 'thinking':
       return <ThinkingBlock data={content.data} isStreaming={isStreaming} />
@@ -55,16 +59,32 @@ function ContentBlock({ content, isStreaming, allContents }: { content: MessageC
       const allReasonings = allContents
         ?.filter(c => c.type === 'decision_reasoning')
         .map(c => c.data) || []
+      // 收集用户输入请求和回复
+      const userInputRequests = allContents
+        ?.filter(c => c.type === 'user_input_request')
+        .map(c => c.data) || []
+      const userReplies = allContents
+        ?.filter(c => c.type === 'user_reply')
+        .map(c => c.data) || []
       if (stepExecution && Array.isArray(stepExecution.data)) {
         return <UnifiedStepsBlock 
           planSteps={content.data} 
           executionSteps={stepExecution.data}
           decisionReasonings={allReasonings}
+          userInputRequests={userInputRequests}
+          userReplies={userReplies}
+          onSubmitUserReply={onSubmitUserReply}
+          onSkipUserInput={onSubmitUserReply ? async (requestId: string) => {
+            // 跳过用户输入，发送空回复或特殊标记
+            if (onSubmitUserReply) {
+              await onSubmitUserReply(requestId, '__SKIP__')
+            }
+          } : undefined}
         />
       }
       // 如果没有 step_execution，仍然显示 PlanBlock（向后兼容）
       return <PlanBlock steps={content.data} />
-    case 'decision_reasoning':
+    case 'decision_reasoning': {
       // 如果已经有 plan，则 decision_reasoning 会被 UnifiedStepsBlock 合并显示，这里不单独显示
       const hasPlanForReasoning = allContents?.some(c => c.type === 'plan')
       if (hasPlanForReasoning) {
@@ -72,7 +92,8 @@ function ContentBlock({ content, isStreaming, allContents }: { content: MessageC
       }
       // 如果没有 plan，单独显示 decision_reasoning
       return <DecisionReasoningBlock reasoning={content.data} />
-    case 'step_execution':
+    }
+    case 'step_execution': {
       // 如果已经有 plan，则 step_execution 会被 plan 合并显示，这里不单独显示
       const hasPlan = allContents?.some(c => c.type === 'plan')
       if (hasPlan) {
@@ -80,6 +101,7 @@ function ContentBlock({ content, isStreaming, allContents }: { content: MessageC
       }
       // 如果没有 plan，单独显示 step_execution
       return <StepExecutionBlock steps={content.data} />
+    }
     case 'tool_call':
       return <ToolCallBlock data={content.data} />
     case 'result':
@@ -88,6 +110,28 @@ function ContentBlock({ content, isStreaming, allContents }: { content: MessageC
       return <ErrorBlock message={content.data} />
     case 'text':
       return <TextBlock text={content.data} />
+    case 'user_input_request': {
+      // 用户输入请求现在由 UnifiedStepsBlock 处理，这里不单独显示
+      // 但如果 UnifiedStepsBlock 不存在，则显示原始组件作为后备
+      const hasPlan = allContents?.some(c => c.type === 'plan')
+      if (hasPlan) {
+        return null // UnifiedStepsBlock 会处理显示
+      }
+      // 如果没有 plan，显示原始组件
+      if (!onSubmitUserReply) {
+        console.warn('onSubmitUserReply not provided, cannot handle user input request')
+        return null
+      }
+      return <UserInputRequest request={content.data} onSubmit={onSubmitUserReply} />
+    }
+    case 'user_reply': {
+      // 用户回复现在由 UnifiedStepsBlock 处理，这里不单独显示
+      const hasPlanForReply = allContents?.some(c => c.type === 'plan')
+      if (hasPlanForReply) {
+        return null // UnifiedStepsBlock 会处理显示
+      }
+      return <UserReply reply={content.data} />
+    }
     default:
       return null
   }

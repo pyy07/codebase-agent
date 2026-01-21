@@ -1,8 +1,10 @@
-import { useState, Fragment } from 'react'
-import { CheckCircle2, Loader2, XCircle, Circle, ListChecks, ChevronDown, ChevronRight, AlertTriangle, Lightbulb } from 'lucide-react'
+import { useState, Fragment, useEffect } from 'react'
+import { CheckCircle2, Loader2, XCircle, Circle, ListChecks, ChevronDown, ChevronRight, AlertTriangle, Lightbulb, MessageSquare, Send, X } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
-import { PlanStep, StepExecutionData, DecisionReasoningData } from '../types'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose } from '@/components/ui/dialog'
+import { PlanStep, StepExecutionData, DecisionReasoningData, UserInputRequestData, UserReplyData } from '../types'
 import './UnifiedStepsBlock.css'
+import './UserInputModal.css'
 
 interface UnifiedStep extends PlanStep {
   result?: string
@@ -10,22 +12,82 @@ interface UnifiedStep extends PlanStep {
   error?: string
   timestamp?: Date
   isNew?: boolean
+  userInputRequest?: UserInputRequestData  // 用户输入请求
+  userReply?: UserReplyData  // 用户回复
 }
 
 interface UnifiedStepsBlockProps {
   planSteps: PlanStep[]
   executionSteps: StepExecutionData[]
   decisionReasonings?: DecisionReasoningData[]  // 支持多个推理原因
+  userInputRequests?: UserInputRequestData[]  // 用户输入请求列表
+  userReplies?: UserReplyData[]  // 用户回复列表
+  onSubmitUserReply?: (requestId: string, reply: string) => Promise<void>
+  onSkipUserInput?: (requestId: string) => Promise<void>
 }
 
-export default function UnifiedStepsBlock({ planSteps, executionSteps, decisionReasonings = [] }: UnifiedStepsBlockProps) {
+export default function UnifiedStepsBlock({ 
+  planSteps, 
+  executionSteps, 
+  decisionReasonings = [],
+  userInputRequests = [],
+  userReplies = [],
+  onSubmitUserReply,
+  onSkipUserInput
+}: UnifiedStepsBlockProps) {
   const [expanded, setExpanded] = useState(true)
   // 默认全部收起，用户需要点击才能展开查看结果
   const [expandedResults, setExpandedResults] = useState<Set<number>>(new Set())
+  const [openModalRequestId, setOpenModalRequestId] = useState<string | null>(null)
   
-  // 合并计划和执行步骤
-  const unifiedSteps: UnifiedStep[] = planSteps.map(planStep => {
+  // 自动打开未回复的用户输入请求的对话框
+  useEffect(() => {
+    // 查找未回复的用户输入请求
+    const unrepliedRequest = userInputRequests.find(req => {
+      const hasReply = userReplies.some(reply => reply.request_id === req.request_id)
+      return !hasReply
+    })
+    
+    // 如果有未回复的请求且对话框未打开，自动打开
+    if (unrepliedRequest && openModalRequestId !== unrepliedRequest.request_id) {
+      setOpenModalRequestId(unrepliedRequest.request_id)
+    }
+  }, [userInputRequests, userReplies, openModalRequestId])
+  
+  // 合并计划和执行步骤，并添加用户交互信息
+  // 用户输入请求关联到最后一个已完成的步骤
+  const unifiedSteps: UnifiedStep[] = planSteps.map((planStep, index) => {
     const executionStep = executionSteps.find(es => es.step === planStep.step)
+    
+    // 查找关联的用户输入请求和回复
+    // 用户输入请求通常发生在某个步骤执行后，Agent 需要更多信息
+    // 我们将用户输入请求关联到最后一个已完成的步骤
+    let relatedRequest: UserInputRequestData | undefined = undefined
+    let relatedReply: UserReplyData | undefined = undefined
+    
+    // 如果当前步骤是最后一个已完成的步骤，查找是否有未回复的用户输入请求
+    if (executionStep?.status === 'completed') {
+      // 检查后续步骤是否都未完成或不存在
+      const hasLaterCompletedSteps = planSteps.slice(index + 1).some(ps => {
+        const es = executionSteps.find(e => e.step === ps.step)
+        return es?.status === 'completed'
+      })
+      
+      // 如果当前是最后一个已完成的步骤，查找用户输入请求
+      if (!hasLaterCompletedSteps) {
+        // 查找未回复的用户输入请求
+        relatedRequest = userInputRequests.find(req => {
+          // 检查是否已有回复
+          const hasReply = userReplies.some(reply => reply.request_id === req.request_id)
+          return !hasReply
+        })
+        
+        if (relatedRequest) {
+          relatedReply = userReplies.find(reply => reply.request_id === relatedRequest!.request_id)
+        }
+      }
+    }
+    
     const mergedStep = {
       ...planStep,
       // 优先使用执行步骤的状态和结果
@@ -34,6 +96,8 @@ export default function UnifiedStepsBlock({ planSteps, executionSteps, decisionR
       result_truncated: executionStep?.result_truncated,
       error: executionStep?.error,
       timestamp: executionStep?.timestamp,
+      userInputRequest: relatedRequest,
+      userReply: relatedReply,
     }
     // 调试日志：检查步骤结果
     if (mergedStep.status === 'completed') {
@@ -258,6 +322,31 @@ export default function UnifiedStepsBlock({ planSteps, executionSteps, decisionR
                         ) : null}
                       </div>
                     )}
+                    
+                    {/* User Interaction Section - 用户交互作为步骤的一部分 */}
+                    {step.userInputRequest && (
+                      <div className="step-user-interaction">
+                        {step.userReply ? (
+                          // 如果已有回复，显示回复内容
+                          <>
+                            <div className="user-interaction-header">
+                              <MessageSquare size={16} className="interaction-icon" />
+                              <span className="interaction-title">用户输入</span>
+                            </div>
+                            <div className="user-reply-display">
+                              <strong>您的回复：</strong>
+                              <p>{step.userReply.reply}</p>
+                            </div>
+                          </>
+                        ) : (
+                          // 如果还没有回复，只显示一个简单的提示（完整内容在对话框中显示）
+                          <div className="user-interaction-pending">
+                            <MessageSquare size={14} className="interaction-icon" />
+                            <span className="pending-text">等待用户输入...</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                   </li>
                 </Fragment>
@@ -266,6 +355,170 @@ export default function UnifiedStepsBlock({ planSteps, executionSteps, decisionR
           </ol>
         </div>
       )}
+      
+      {/* User Input Modal Dialog */}
+      {openModalRequestId && (() => {
+        const request = userInputRequests.find(r => r.request_id === openModalRequestId)
+        if (!request) return null
+        
+        return (
+          <UserInputModal
+            request={request}
+            onSubmit={async (reply: string) => {
+              // 立即关闭对话框
+              setOpenModalRequestId(null)
+              // 然后提交回复（不等待响应）
+              if (onSubmitUserReply) {
+                onSubmitUserReply(request.request_id, reply).catch((error) => {
+                  console.error('Error submitting reply:', error)
+                })
+              }
+            }}
+            onSkip={async () => {
+              // 立即关闭对话框
+              setOpenModalRequestId(null)
+              // 然后执行跳过（不等待响应）
+              if (onSkipUserInput) {
+                onSkipUserInput(request.request_id).catch((error) => {
+                  console.error('Error skipping input:', error)
+                })
+              }
+            }}
+            onCancel={() => {
+              // onCancel 不再使用，但保留接口兼容性
+              setOpenModalRequestId(null)
+            }}
+          />
+        )
+      })()}
     </div>
+  )
+}
+
+// User Input Modal Component
+interface UserInputModalProps {
+  request: UserInputRequestData
+  onSubmit: (reply: string) => Promise<void>
+  onSkip: () => Promise<void>
+  onCancel: () => void
+}
+
+function UserInputModal({ request, onSubmit, onSkip, onCancel }: UserInputModalProps) {
+  const [reply, setReply] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!reply.trim() || isSubmitting) return
+    
+    const replyText = reply.trim()
+    setIsSubmitting(true)
+    
+    // 立即关闭对话框，不等待后端响应
+    // 用户回复会立即显示在主界面，后续分析通过 SSE 流式更新
+    onSubmit(replyText).catch((error) => {
+      console.error('Error submitting reply:', error)
+      // 错误会通过 handleError 显示，不影响对话框关闭
+    })
+    
+    // 对话框会在 onSubmit 调用后立即关闭（因为 onSubmit 立即返回）
+  }
+  
+  const handleClose = async () => {
+    if (isSubmitting) return
+    setIsSubmitting(true)
+    
+    // 立即关闭对话框，不等待后端响应
+    // 跳过操作会在后台执行，后续分析通过 SSE 流式更新
+    onSkip().catch((error) => {
+      console.error('Error closing/skipping input:', error)
+      // 错误会通过 handleError 显示，不影响对话框关闭
+    })
+    
+    // 对话框会在 onSkip 调用后立即关闭（因为 onSkip 立即返回）
+  }
+  
+  const isDark = document.documentElement.classList.contains('dark')
+  
+  return (
+    <Dialog open={true} onOpenChange={(open) => {
+      if (!open && !isSubmitting) {
+        handleClose()
+      }
+    }}>
+      <DialogContent>
+        <DialogClose onClose={handleClose} />
+        <div className="user-input-modal-content">
+          <div className="user-input-modal-header">
+            <div className="user-input-modal-title">
+              <MessageSquare size={20} className="user-input-modal-title-icon" />
+              <span>Agent 需要您的帮助</span>
+            </div>
+            <div className="user-input-modal-description">
+              请提供以下信息以继续分析
+            </div>
+          </div>
+          
+          <div className="user-input-modal-section">
+            <label className="user-input-modal-section-label">问题</label>
+            <div className="user-input-modal-section-content">
+              {request.question}
+            </div>
+          </div>
+          
+          {request.context && (
+            <div className="user-input-modal-section">
+              <label className="user-input-modal-section-label">上下文</label>
+              <div className="user-input-modal-section-content">
+                {request.context}
+              </div>
+            </div>
+          )}
+          
+          <form onSubmit={handleSubmit} className="user-input-modal-form">
+            <label htmlFor="reply-input" className="user-input-modal-label">
+              您的回复
+            </label>
+            <textarea
+              id="reply-input"
+              value={reply}
+              onChange={(e) => setReply(e.target.value)}
+              placeholder="请输入您的回复..."
+              className="user-input-modal-textarea"
+              disabled={isSubmitting}
+              rows={5}
+            />
+            
+            <div className="user-input-modal-footer">
+              <button
+                type="button"
+                onClick={handleClose}
+                disabled={isSubmitting}
+                className="user-input-modal-button user-input-modal-button-secondary"
+              >
+                关闭（不提供信息）
+              </button>
+              <button
+                type="submit"
+                disabled={!reply.trim() || isSubmitting}
+                className="user-input-modal-button user-input-modal-button-primary"
+              >
+                {isSubmitting ? (
+                  <>
+                    <Loader2 size={16} className="user-input-modal-button-icon user-input-modal-spinner" />
+                    提交中...
+                  </>
+                ) : (
+                  <>
+                    <Send size={16} className="user-input-modal-button-icon" />
+                    提交回复
+                  </>
+                )}
+              </button>
+            </div>
+          </form>
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }

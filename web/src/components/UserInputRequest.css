@@ -1,0 +1,88 @@
+.user-input-request {
+  margin: 16px 0;
+  padding: 16px;
+  background: var(--card-bg, #ffffff);
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 8px;
+  border-left: 4px solid var(--primary-color, #3b82f6);
+}
+
+.dark .user-input-request {
+  background: var(--card-bg, #1f2937);
+  border-color: var(--border-color, #374151);
+}
+
+.request-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.request-icon {
+  color: var(--primary-color, #3b82f6);
+}
+
+.request-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary, #111827);
+}
+
+.dark .request-title {
+  color: var(--text-primary, #f9fafb);
+}
+
+.request-content {
+  margin-bottom: 16px;
+}
+
+.request-question,
+.request-context {
+  margin-bottom: 12px;
+}
+
+.request-question strong,
+.request-context strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13px;
+  color: var(--text-secondary, #6b7280);
+}
+
+.dark .request-question strong,
+.dark .request-context strong {
+  color: var(--text-secondary, #9ca3af);
+}
+
+.request-question p,
+.request-context p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-primary, #111827);
+}
+
+.dark .request-question p,
+.dark .request-context p {
+  color: var(--text-primary, #f9fafb);
+}
+
+.reply-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.reply-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 80px;
+}
+
+.reply-submit-button {
+  align-self: flex-end;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}

@@ -12,6 +12,10 @@ from codebase_driven_agent.api.models import (
     AsyncTaskResponse,
     AnalysisResult,
     ContextFile,
+    UserReplyRequest,
+    UserReplyResponse,
+    SkipUserInputRequest,
+    SkipUserInputResponse,
 )
 from codebase_driven_agent.config import settings
 from codebase_driven_agent.utils.logger import setup_logger
@@ -131,13 +135,13 @@ def _parse_context_files(context_files: Optional[List[ContextFile]]) -> Dict:
 
 
 async def _execute_analysis(request: AnalyzeRequest) -> AnalysisResult:
-    """执行分析（集成 Agent）"""
-    from codebase_driven_agent.agent.executor import AgentExecutorWrapper
+    """执行分析（集成 Agent）- 使用 GraphExecutorWrapper"""
+    from codebase_driven_agent.agent.graph_executor import GraphExecutorWrapper
     from codebase_driven_agent.agent.output_parser import OutputParser
     
     try:
-        # 创建 Agent 执行器
-        executor = AgentExecutorWrapper()
+        # 创建 GraphExecutor 执行器
+        executor = GraphExecutorWrapper()
         
         # 解析 context_files
         context_files = None
@@ -162,19 +166,15 @@ async def _execute_analysis(request: AnalyzeRequest) -> AnalysisResult:
         if not result.get("success"):
             raise Exception(result.get("error", "Agent execution failed"))
         
-        # 解析 Agent 输出
+        # GraphExecutorWrapper 返回的 final_result 已经是 AnalysisResult 格式
+        if result.get("final_result"):
+            return result["final_result"]
+        
+        # 如果没有 final_result，尝试解析 output
         output_parser = OutputParser()
         parsed_result = output_parser.parse(result.get("output", ""))
         
-        # parsed_result 已经是 AnalysisResult 对象，直接使用
-        analysis_result = parsed_result
-        
-        # 从 intermediate_steps 提取相关信息
-        from codebase_driven_agent.utils.extractors import extract_from_intermediate_steps
-        intermediate_steps = result.get("intermediate_steps", [])
-        analysis_result = extract_from_intermediate_steps(intermediate_steps, analysis_result)
-        
-        return analysis_result
+        return parsed_result
     
     except Exception as e:
         logger.error(f"Analysis execution failed: {str(e)}", exc_info=True)
@@ -364,4 +364,331 @@ async def get_task_status(task_id: str):
         error=task.get("error"),
         execution_time=task.get("execution_time"),
     )
+
+
+@router.post("/analyze/reply", response_model=UserReplyResponse)
+async def reply_to_agent(reply_request: UserReplyRequest):
+    """
+    用户回复 Agent 的询问
+    
+    当 Agent 请求用户输入时，用户可以通过此端点提交回复。
+    系统会恢复 Agent 执行流程，继续分析。
+    """
+    from codebase_driven_agent.agent.session_manager import get_session_manager
+    from langchain_core.messages import HumanMessage
+    import asyncio
+    
+    session_manager = get_session_manager()
+    session = session_manager.get_session(reply_request.request_id)
+    
+    if not session:
+        logger.warning(f"Session not found or expired: {reply_request.request_id}")
+        raise HTTPException(
+            status_code=404,
+            detail="会话不存在或已过期，请重新开始分析"
+        )
+    
+    try:
+        # 将用户回复添加到消息历史
+        state = session.state
+        messages = list(state.get("messages", []))
+        messages.append(HumanMessage(content=f"用户回复：{reply_request.reply}"))
+        
+        # 更新状态
+        updated_state = dict(state)
+        updated_state["messages"] = messages
+        updated_state["should_continue"] = True  # 恢复执行
+        updated_state["decision"] = None  # 清除之前的决策
+        
+        # 恢复 Agent 执行
+        executor = session.executor
+        message_queue = session.message_queue
+        
+        # 确保 executor 的 message_queue 正确设置（用户回复后的执行需要使用同一个队列）
+        # GraphExecutorWrapper 内部使用 self.executor (GraphExecutor)，需要设置 executor.executor.message_queue
+        graph_executor = None
+        if executor:
+            if hasattr(executor, 'executor') and hasattr(executor.executor, 'message_queue'):
+                graph_executor = executor.executor
+                graph_executor.message_queue = message_queue
+                logger.info(f"Updated executor.executor.message_queue for session {reply_request.request_id}")
+            elif hasattr(executor, 'message_queue'):
+                graph_executor = executor
+                graph_executor.message_queue = message_queue
+                logger.info(f"Updated executor.message_queue for session {reply_request.request_id}")
+        
+        if not graph_executor:
+            logger.error(f"Failed to get graph_executor for session {reply_request.request_id}")
+            raise HTTPException(
+                status_code=500,
+                detail="无法获取执行器实例"
+            )
+        
+        # 在后台继续执行 Agent
+        async def continue_execution():
+            try:
+                # 使用更新后的状态继续执行
+                # 注意：这里需要从 request_user_input 节点之后继续，即 execute_step
+                # 但由于 LangGraph 的限制，我们需要重新运行图，从当前状态开始
+                # 实际上，由于图结构是 request_user_input -> execute_step，用户回复后应该继续执行
+                # 我们需要手动触发下一步执行
+                
+                # 更新会话状态
+                session.state = updated_state
+                
+                # 发送用户回复消息到前端
+                if message_queue:
+                    logger.info(f"Putting user_reply message into queue for session {reply_request.request_id}")
+                    message_queue.put_nowait({
+                        "event": "user_reply",
+                        "data": {
+                            "request_id": reply_request.request_id,
+                            "reply": reply_request.reply,
+                        }
+                    })
+                    logger.info(f"User_reply message queued successfully, queue size: {message_queue.qsize()}")
+                
+                # 由于 LangGraph 不支持从中间节点开始执行，我们需要手动执行后续节点
+                # 图结构是：request_user_input -> execute_step -> decide -> ...
+                # 用户回复后，应该让 Agent 基于新信息重新决策下一步
+                
+                # 继续执行决策和执行循环
+                max_iterations = 50  # 防止无限循环
+                iteration = 0
+                
+                while iteration < max_iterations:
+                    iteration += 1
+                    
+                    # 执行决策节点（基于用户回复重新决策）
+                    # 使用 graph_executor 而不是 executor
+                    decision_result = graph_executor._decision_node(updated_state)
+                    updated_state.update(decision_result)
+                    session.state = updated_state
+                    
+                    # 检查下一步动作
+                    next_action = graph_executor._should_continue(updated_state)
+                    logger.info(f"User reply: Next action after decision: {next_action}")
+                    
+                    if next_action == "synthesize":
+                        # 生成最终结果
+                        logger.info("User reply: Executing synthesize node")
+                        # 在线程池中执行同步的 _synthesize_node，避免阻塞事件循环
+                        import asyncio
+                        synthesize_result = await asyncio.to_thread(
+                            graph_executor._synthesize_node,
+                            updated_state
+                        )
+                        updated_state.update(synthesize_result)
+                        session.state = updated_state
+                        # _synthesize_node 会自动发送 result 和 done 事件到消息队列
+                        logger.info("User reply: Synthesize completed, result and done events should be queued")
+                        break
+                    elif next_action == "request_input":
+                        # 再次请求用户输入，保存会话
+                        request_result = graph_executor._request_user_input_node(updated_state)
+                        updated_state.update(request_result)
+                        session.state = updated_state
+                        # 更新会话的 request_id
+                        new_request_id = request_result.get("request_id")
+                        if new_request_id and new_request_id != reply_request.request_id:
+                            session_manager.remove_session(reply_request.request_id)
+                            session_manager.create_session(
+                                state=updated_state,
+                                executor=executor,
+                                message_queue=message_queue,
+                                request_id=new_request_id
+                            )
+                        break
+                    elif next_action == "continue":
+                        # "continue" 表示应该执行 execute_step 节点
+                        logger.info("User reply: Action is 'continue', executing step node")
+                        # 在线程池中执行同步的 _execute_step_node，避免阻塞事件循环
+                        import asyncio
+                        step_result = await asyncio.to_thread(
+                            graph_executor._execute_step_node,
+                            updated_state
+                        )
+                        updated_state.update(step_result)
+                        session.state = updated_state
+                        # 执行步骤后，继续循环进行决策
+                    elif next_action == "execute_step":
+                        # 继续执行步骤（这个分支实际上不应该被 _should_continue 返回，但保留以防万一）
+                        logger.info("User reply: Action is 'execute_step', executing step node")
+                        # 在线程池中执行同步的 _execute_step_node，避免阻塞事件循环
+                        import asyncio
+                        step_result = await asyncio.to_thread(
+                            graph_executor._execute_step_node,
+                            updated_state
+                        )
+                        updated_state.update(step_result)
+                        session.state = updated_state
+                    elif next_action == "plan" or next_action == "adjust_plan":
+                        # 调整计划
+                        logger.info(f"User reply: Action is '{next_action}', executing plan node")
+                        # 在线程池中执行同步的 _plan_node，避免阻塞事件循环
+                        import asyncio
+                        plan_result = await asyncio.to_thread(
+                            graph_executor._plan_node,
+                            updated_state
+                        )
+                        updated_state.update(plan_result)
+                        session.state = updated_state
+                    elif next_action == "end":
+                        logger.info("User reply: Action is 'end', stopping execution")
+                        break
+                    else:
+                        logger.warning(f"Unknown next action: {next_action}, stopping execution")
+                        break
+                
+                # 清理会话
+                session_manager.remove_session(reply_request.request_id)
+                
+            except Exception as e:
+                logger.error(f"Error continuing execution after user reply: {e}", exc_info=True)
+                if message_queue:
+                    message_queue.put_nowait({
+                        "event": "error",
+                        "data": {"error": f"继续执行时出错: {str(e)}"}
+                    })
+                session_manager.remove_session(reply_request.request_id)
+        
+        # 在后台任务中继续执行（不等待完成，立即返回）
+        task = asyncio.create_task(continue_execution())
+        logger.info(f"Created background task for continue_execution, task id: {id(task)}")
+        
+        logger.info(f"User reply received for session {reply_request.request_id}, continuing execution in background")
+        
+        # 立即返回，不等待后台任务完成
+        return UserReplyResponse(
+            success=True,
+            message="回复已收到，Agent 将继续分析"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing user reply: {e}", exc_info=True)
+        session_manager.remove_session(reply_request.request_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"处理用户回复时出错: {str(e)}"
+        )
+
+
+@router.post("/analyze/skip", response_model=SkipUserInputResponse)
+async def skip_user_input(skip_request: SkipUserInputRequest):
+    """
+    跳过用户输入，让 Agent 基于已有信息直接得出结论
+    
+    当用户无法提供进一步信息时，可以通过此端点跳过用户输入请求。
+    系统会通知 Agent 用户无法提供信息，让 Agent 基于已有信息得出结论。
+    """
+    from codebase_driven_agent.agent.session_manager import get_session_manager
+    from langchain_core.messages import HumanMessage
+    import asyncio
+    
+    session_manager = get_session_manager()
+    session = session_manager.get_session(skip_request.request_id)
+    
+    if not session:
+        logger.warning(f"Session not found or expired: {skip_request.request_id}")
+        raise HTTPException(
+            status_code=404,
+            detail="会话不存在或已过期，请重新开始分析"
+        )
+    
+    try:
+        # 将跳过信息添加到消息历史
+        state = session.state
+        messages = list(state.get("messages", []))
+        messages.append(HumanMessage(content="用户无法提供进一步信息，请基于已有信息得出结论。"))
+        
+        # 更新状态
+        updated_state = dict(state)
+        updated_state["messages"] = messages
+        updated_state["should_continue"] = True  # 恢复执行
+        updated_state["decision"] = None  # 清除之前的决策
+        
+        # 恢复 Agent 执行
+        executor = session.executor
+        message_queue = session.message_queue
+        
+        # 确保 executor 的 message_queue 正确设置
+        graph_executor = None
+        if executor:
+            if hasattr(executor, 'executor') and hasattr(executor.executor, 'message_queue'):
+                graph_executor = executor.executor
+                graph_executor.message_queue = message_queue
+                logger.info(f"Updated executor.executor.message_queue for session {skip_request.request_id}")
+            elif hasattr(executor, 'message_queue'):
+                graph_executor = executor
+                graph_executor.message_queue = message_queue
+                logger.info(f"Updated executor.message_queue for session {skip_request.request_id}")
+        
+        if not graph_executor:
+            logger.error(f"Failed to get graph_executor for session {skip_request.request_id}")
+            raise HTTPException(
+                status_code=500,
+                detail="无法获取执行器实例"
+            )
+        
+        # 在后台继续执行 Agent，直接进入 synthesize
+        async def continue_execution():
+            try:
+                session.state = updated_state
+                
+                # 发送跳过消息到前端
+                if message_queue:
+                    message_queue.put_nowait({
+                        "event": "user_reply",
+                        "data": {
+                            "request_id": skip_request.request_id,
+                            "reply": "[已跳过，Agent 将基于已有信息得出结论]",
+                        }
+                    })
+                
+                # graph_executor 已经在上面设置好了
+                if not graph_executor:
+                    raise ValueError("graph_executor is not available")
+                
+                # 直接执行 synthesize 节点，基于已有信息得出结论
+                logger.info("Skip user input: Executing synthesize node directly")
+                # 在线程池中执行同步的 _synthesize_node，避免阻塞事件循环
+                import asyncio
+                synthesize_result = await asyncio.to_thread(
+                    graph_executor._synthesize_node,
+                    updated_state
+                )
+                updated_state.update(synthesize_result)
+                session.state = updated_state
+                # _synthesize_node 会自动发送 result 和 done 事件到消息队列
+                logger.info("Skip user input: Synthesize completed, result and done events should be queued")
+                
+                # 清理会话
+                session_manager.remove_session(skip_request.request_id)
+                
+            except Exception as e:
+                logger.error(f"Error continuing execution after skip: {e}", exc_info=True)
+                if message_queue:
+                    message_queue.put_nowait({
+                        "event": "error",
+                        "data": {"error": f"继续执行时出错: {str(e)}"}
+                    })
+                session_manager.remove_session(skip_request.request_id)
+        
+        # 在后台任务中继续执行
+        asyncio.create_task(continue_execution())
+        
+        logger.info(f"User input skipped for session {skip_request.request_id}, continuing execution")
+        
+        return SkipUserInputResponse(
+            success=True,
+            message="已跳过，Agent 将基于已有信息得出结论"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing skip request: {e}", exc_info=True)
+        session_manager.remove_session(skip_request.request_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"处理跳过请求时出错: {str(e)}"
+        )
 

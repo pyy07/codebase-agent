@@ -56,23 +56,27 @@ class ReadTool(BaseCodebaseTool):
                 )
             
             # 构建完整路径
-            repo_path = Path(self.code_repo_path)
+            repo_path = Path(self.code_repo_path).resolve()
             if not repo_path.exists():
                 return ToolResult(
                     success=False,
                     error=f"代码仓库路径不存在: {self.code_repo_path}"
                 )
             
-            # 解析文件路径（防止路径遍历攻击）
-            full_path = (repo_path / file_path).resolve()
+            # 将 file_path 标准化为相对路径（移除前导斜杠和反斜杠）
+            # 确保 file_path 被当作相对于 repo_path 的相对路径
+            normalized_file_path = file_path.strip().lstrip('/\\')
             
-            # 确保文件在代码仓库内
+            # 构建完整路径（file_path 必须是相对路径）
+            full_path = (repo_path / normalized_file_path).resolve()
+            
+            # 确保文件在代码仓库内（防止路径遍历攻击）
             try:
-                full_path.relative_to(repo_path.resolve())
+                full_path.relative_to(repo_path)
             except ValueError:
                 return ToolResult(
                     success=False,
-                    error=f"文件路径超出代码仓库范围: {file_path}"
+                    error=f"文件路径超出代码仓库范围: {file_path} (解析后: {full_path})"
                 )
             
             # 检查文件是否存在

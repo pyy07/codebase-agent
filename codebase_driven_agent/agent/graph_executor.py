@@ -8,8 +8,9 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 import operator
 
-from codebase_driven_agent.agent.executor import create_llm, get_tools
+from codebase_driven_agent.agent.utils import create_llm, get_tools
 from codebase_driven_agent.agent.prompt import generate_system_prompt
+from codebase_driven_agent.agent.session_manager import get_session_manager
 from codebase_driven_agent.utils.logger import setup_logger
 from codebase_driven_agent.utils.database import get_schema_info, format_schema_info
 from codebase_driven_agent.config import settings
@@ -17,7 +18,7 @@ from codebase_driven_agent.config import settings
 logger = setup_logger("codebase_driven_agent.agent.graph_executor")
 
 
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     """Agent 状态定义"""
 
     messages: Annotated[Sequence[operator.add], operator.add]
@@ -27,6 +28,10 @@ class AgentState(TypedDict):
     should_continue: bool
     original_input: str
     context_files: Optional[List[Dict[str, Any]]]
+    decision: Optional[str]  # 决策结果：continue, synthesize, adjust_plan, request_input
+    user_input_question: Optional[str]  # 用户输入请求的问题
+    user_input_context: Optional[str]  # 用户输入请求的上下文
+    request_id: Optional[str]  # 用户输入请求的 ID
 
 
 class GraphExecutor:
@@ -61,6 +66,7 @@ class GraphExecutor:
         graph.add_node("execute_step", self._execute_step_node)
         graph.add_node("decide", self._decision_node)
         graph.add_node("synthesize", self._synthesize_node)
+        graph.add_node("request_user_input", self._request_user_input_node)
 
         # 设置入口点
         graph.set_entry_point("plan")
@@ -77,11 +83,13 @@ class GraphExecutor:
                 "continue": "execute_step",
                 "adjust_plan": "plan",
                 "synthesize": "synthesize",
+                "request_input": "request_user_input",
                 "end": END,
             },
         )
 
         graph.add_edge("synthesize", END)
+        graph.add_edge("request_user_input", END)  # 请求用户输入后暂停，等待用户回复
 
         return graph.compile()
 
@@ -316,11 +324,30 @@ class GraphExecutor:
             action = decision.get("action", "synthesize")
             reasoning = decision.get("reasoning", "")
             next_steps = decision.get("next_steps", [])
+            question = decision.get("question", "")
+            context = decision.get("context", "")
             
             logger.info(f"Decision node: LLM decided to '{action}'. Reasoning: {reasoning[:200]}")
             logger.info(f"Decision node: Extracted {len(next_steps)} next steps")
+            logger.info(f"Decision node: Parsed decision - action={action}, has_question={bool(question)}, question={question[:100] if question else 'N/A'}")
+            logger.debug(f"Decision node: Full parsed decision: {decision}")
             
-            if action == "continue":
+            if action == "request_input":
+                # LLM 决定请求用户输入
+                logger.info(f"Decision node: Requesting user input. Question: {question[:200]}")
+                
+                # 保存请求信息到状态中
+                result_state = {
+                    "should_continue": True,
+                    "decision": "request_input",
+                    "user_input_question": question,
+                    "user_input_context": context,
+                    "messages": messages,
+                }
+                logger.info(f"Decision node: Returning state with decision=request_input, keys: {list(result_state.keys())}")
+                return result_state
+            
+            elif action == "continue":
                 # LLM 决定继续，获取新步骤
                 if not next_steps:
                     logger.warning("Decision node: LLM said continue but provided no steps")
@@ -380,6 +407,48 @@ class GraphExecutor:
             logger.warning("Decision node: Falling back to synthesize due to error")
             return {"should_continue": False}
 
+    def _request_user_input_node(self, state: AgentState) -> Dict[str, Any]:
+        """请求用户输入节点：暂停执行，等待用户回复"""
+        import uuid
+        
+        question = state.get("user_input_question", "")
+        context = state.get("user_input_context", "")
+        
+        logger.info(f"Request user input node: Question: {question[:200]}")
+        
+        # 生成请求 ID
+        request_id = str(uuid.uuid4())
+        
+        # 保存会话状态
+        session_manager = get_session_manager()
+        session_manager.create_session(
+            state=state,
+            executor=self,
+            message_queue=self.message_queue,
+            request_id=request_id
+        )
+        
+        # 发送 user_input_request 事件到前端
+        if self.message_queue:
+            try:
+                self.message_queue.put_nowait({
+                    "event": "user_input_request",
+                    "data": {
+                        "request_id": request_id,
+                        "question": question,
+                        "context": context,
+                    }
+                })
+                logger.info(f"Request user input node: Sent user_input_request event with request_id={request_id}")
+            except Exception as e:
+                logger.error(f"Failed to queue user_input_request message: {e}", exc_info=True)
+        
+        # 暂停执行（不返回 should_continue=False，因为用户回复后会继续）
+        # 状态保持不变，等待用户回复
+        return {
+            "request_id": request_id,
+        }
+    
     def _synthesize_node(self, state: AgentState) -> Dict[str, Any]:
         """综合节点：整合所有步骤结果，生成最终分析结论
 
@@ -414,7 +483,25 @@ class GraphExecutor:
             from langchain_core.messages import AIMessage
             messages.append(AIMessage(content="由于对话上下文过长，已基于已执行的步骤生成简化分析结果。"))
         else:
+            # 发送进度消息，告知用户正在生成结果
+            if self.message_queue:
+                try:
+                    self.message_queue.put_nowait({
+                        "event": "progress",
+                        "data": {
+                            "message": "正在生成最终分析结果...",
+                            "progress": 0.95,
+                            "step": "synthesizing"
+                        }
+                    })
+                    logger.info("Progress message queued: synthesizing")
+                except Exception as e:
+                    logger.warning(f"Failed to queue progress message: {e}")
+            
+            # 直接调用 LLM（调用方已经在线程池中执行此方法，所以这里不需要再次包装）
+            # 这样可以避免双重线程池包装，提高性能
             response = self.llm.invoke(messages)
+            
             messages.append(AIMessage(content=response.content))
 
             # 提取结构化结果
@@ -436,12 +523,23 @@ class GraphExecutor:
     def _should_continue(self, state: AgentState) -> str:
         """判断下一步执行路径"""
         if not state["should_continue"]:
+            logger.debug(f"_should_continue: should_continue=False, returning synthesize")
             return "synthesize"
 
         # 检查是否需要调整计划
-        if state.get("decision") == "adjust_plan":
+        decision = state.get("decision")
+        logger.debug(f"_should_continue: decision={decision}, state keys: {list(state.keys())}")
+        
+        if decision == "adjust_plan":
+            logger.debug(f"_should_continue: returning adjust_plan")
             return "adjust_plan"
+        
+        # 检查是否需要请求用户输入
+        if decision == "request_input":
+            logger.info(f"_should_continue: decision=request_input, returning request_input")
+            return "request_input"
 
+        logger.debug(f"_should_continue: returning continue")
         return "continue"
 
     def _build_initial_plan_prompt(
@@ -562,6 +660,7 @@ class GraphExecutor:
 2. 如果需要继续收集信息（包括工具调用失败后需要尝试其他方法） → **必须**回复 "action": "continue"，并且 **必须**提供 next_steps 数组，至少包含一个步骤
 3. **如果选择 continue，next_steps 不能为空！** 必须明确指定下一步要执行的操作
 4. **如果步骤失败，请分析失败原因，决定是重试、换方法，还是基于已有信息得出结论**
+5. **如果发现信息不足，需要用户提供额外信息** → 回复 "action": "request_input"，并提供 "question" 字段说明需要什么信息以及为什么需要
 
 **关键：使用 code_search 时的 target 字段规则：**
 - target 必须是**实际的搜索字符串**（例如：错误信息、函数名、变量名等），而不是中文描述
@@ -570,16 +669,18 @@ class GraphExecutor:
 - 如果用户输入包含文件路径和行号（如 "file.py:42" 或 "file.py line 10-20"），可以在 target 中包含行号信息，系统会自动提取并只返回指定行的内容，减少上下文
 
 示例：
-- ✅ 正确：如果用户输入包含 "FileNotFoundError"，则 {{"action": "使用 code_search 工具搜索代码仓库中包含 'FileNotFoundError' 的代码片段", "target": "FileNotFoundError"}}
-- ✅ 正确：如果用户输入包含函数名 "processPayment"，则 {{"action": "使用 code_search 工具搜索代码仓库中包含 'processPayment' 的函数定义", "target": "processPayment"}}
-- ✅ 正确：如果用户输入包含 "src/utils.py:10-50"，则 {{"action": "使用 code_search 工具查看文件 src/utils.py:10-50", "target": "src/utils.py:10-50"}}
+- ✅ 正确（continue）：如果用户输入包含 "FileNotFoundError"，则 {{"action": "continue", "reasoning": "...", "next_steps": [{{"step": 2, "action": "使用 code_search 工具搜索代码仓库中包含 'FileNotFoundError' 的代码片段", "target": "FileNotFoundError"}}]}}
+- ✅ 正确（continue）：如果用户输入包含函数名 "processPayment"，则 {{"action": "continue", "reasoning": "...", "next_steps": [{{"step": 2, "action": "使用 code_search 工具搜索代码仓库中包含 'processPayment' 的函数定义", "target": "processPayment"}}]}}
+- ✅ 正确（request_input）：如果用户输入非常模糊（如"我的代码出错了"），缺少关键信息，则 {{"action": "request_input", "reasoning": "用户问题缺少具体的错误信息，无法进行有效分析", "question": "请提供具体的错误信息，包括：1) 错误类型（如 FileNotFoundError、ValueError 等）2) 错误消息 3) 相关的文件路径和行号（如果有）", "context": "当前只有模糊的问题描述，需要更多信息才能定位问题"}}
 - ❌ 错误：{{"action": "使用 code_search 工具搜索代码仓库", "target": "[定位错误信息在代码中的具体位置]"}}
 
 请严格按照以下JSON格式回复（不要添加任何其他文本）：
 ```json
 {{
-  "action": "continue" 或 "synthesize",
-  "reasoning": "决策理由（说明为什么选择继续或结束）",
+  "action": "continue" 或 "synthesize" 或 "request_input",
+  "reasoning": "决策理由（说明为什么选择继续、结束或请求用户输入）",
+  "question": "如果需要用户输入，说明需要什么信息以及为什么需要（仅在 action 为 request_input 时需要）",
+  "context": "可选的上下文信息，帮助用户理解为什么需要这个信息（仅在 action 为 request_input 时可选）",
   "next_steps": [
     {{
       "step": {current_step + 1},
@@ -593,6 +694,7 @@ class GraphExecutor:
 **注意：**
 - 如果 action 是 "continue"，next_steps 必须是一个非空数组
 - 如果 action 是 "synthesize"，next_steps 可以为空数组或省略
+- 如果 action 是 "request_input"，必须提供 question 字段，context 字段可选，next_steps 可以为空（用户回复后再决定下一步）
 - **如果使用 code_search，target 必须是实际的搜索字符串，不是中文描述！**
 - **如果查看文件，可以在文件路径后添加行号范围（如 'file.py:10-50'），减少返回的上下文**
 - 请确保 JSON 格式正确，可以直接被解析"""
@@ -888,6 +990,35 @@ class GraphExecutor:
                     'action': 'synthesize',
                     'reasoning': reasoning or llm_response[:200],
                     'next_steps': []
+                }
+            elif action == "request_input":
+                # 如果 action 是 request_input，必须提供 question
+                question = parsed_json.get('question', '')
+                context = parsed_json.get('context', '')
+                logger.info(f"[_parse_decision] Parsed request_input - question length: {len(question)}, question: {question[:200] if question else 'EMPTY'}")
+                logger.debug(f"[_parse_decision] Full parsed_json keys: {list(parsed_json.keys())}")
+                if not question:
+                    logger.warning(f"[_parse_decision] LLM returned 'request_input' but question is empty. Full response: {llm_response[:1000]}")
+                    logger.warning(f"[_parse_decision] Parsed JSON: {parsed_json}")
+                    # 如果没有 question，尝试从 reasoning 中提取，或者生成一个默认问题
+                    # 如果 reasoning 包含有用的信息，可以基于它生成问题
+                    if reasoning:
+                        # 尝试从 reasoning 中提取问题
+                        question = f"根据您的描述，我需要更多信息来帮助分析问题。{reasoning[:200]}"
+                        logger.info(f"[_parse_decision] Generated question from reasoning: {question[:200]}")
+                    else:
+                        # 回退到 synthesize
+                        return {
+                            'action': 'synthesize',
+                            'reasoning': llm_response[:200],
+                            'next_steps': []
+                        }
+                return {
+                    'action': 'request_input',
+                    'reasoning': reasoning or llm_response[:200],
+                    'question': question,
+                    'context': context,
+                    'next_steps': next_steps if next_steps else []
                 }
             elif action == "continue":
                 # 如果 action 是 continue，必须提供 next_steps
