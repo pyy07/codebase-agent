@@ -54,41 +54,16 @@ export default function UnifiedStepsBlock({
     }
   }, [userInputRequests, userReplies, openModalRequestId])
   
-  // 合并计划和执行步骤，并添加用户交互信息
-  // 用户输入请求关联到最后一个已完成的步骤
-  const unifiedSteps: UnifiedStep[] = planSteps.map((planStep, index) => {
+  // 合并计划和执行步骤，并将用户交互作为独立步骤插入
+  // 构建包含用户交互步骤的完整步骤列表
+  const unifiedSteps: UnifiedStep[] = []
+  const insertedRequestIds = new Set<string>() // 跟踪已插入的请求ID
+  
+  // 首先处理所有计划步骤
+  planSteps.forEach((planStep, index) => {
     const executionStep = executionSteps.find(es => es.step === planStep.step)
     
-    // 查找关联的用户输入请求和回复
-    // 用户输入请求通常发生在某个步骤执行后，Agent 需要更多信息
-    // 我们将用户输入请求关联到最后一个已完成的步骤
-    let relatedRequest: UserInputRequestData | undefined = undefined
-    let relatedReply: UserReplyData | undefined = undefined
-    
-    // 如果当前步骤是最后一个已完成的步骤，查找是否有未回复的用户输入请求
-    if (executionStep?.status === 'completed') {
-      // 检查后续步骤是否都未完成或不存在
-      const hasLaterCompletedSteps = planSteps.slice(index + 1).some(ps => {
-        const es = executionSteps.find(e => e.step === ps.step)
-        return es?.status === 'completed'
-      })
-      
-      // 如果当前是最后一个已完成的步骤，查找用户输入请求
-      if (!hasLaterCompletedSteps) {
-        // 查找未回复的用户输入请求
-        relatedRequest = userInputRequests.find(req => {
-          // 检查是否已有回复
-          const hasReply = userReplies.some(reply => reply.request_id === req.request_id)
-          return !hasReply
-        })
-        
-        if (relatedRequest) {
-          relatedReply = userReplies.find(reply => reply.request_id === relatedRequest!.request_id)
-        }
-      }
-    }
-    
-    const mergedStep = {
+    const mergedStep: UnifiedStep = {
       ...planStep,
       // 优先使用执行步骤的状态和结果
       status: executionStep?.status || planStep.status,
@@ -96,25 +71,78 @@ export default function UnifiedStepsBlock({
       result_truncated: executionStep?.result_truncated,
       error: executionStep?.error,
       timestamp: executionStep?.timestamp,
-      userInputRequest: relatedRequest,
-      userReply: relatedReply,
     }
-    // 调试日志：检查步骤结果
-    if (mergedStep.status === 'completed') {
-      console.log(`[UnifiedStepsBlock] Step ${mergedStep.step}:`, {
-        status: mergedStep.status,
-        hasResult: !!mergedStep.result,
-        hasError: !!mergedStep.error,
-        resultLength: mergedStep.result?.length || 0,
-        resultPreview: mergedStep.result?.substring(0, 100) || 'N/A',
-        executionStep: executionStep ? {
-          step: executionStep.step,
-          hasResult: !!executionStep.result,
-          hasError: !!executionStep.error
-        } : 'not found'
+    
+    unifiedSteps.push(mergedStep)
+    
+    // 在当前步骤完成后，检查是否有用户输入请求
+    // 用户输入请求应该插入在当前步骤之后，下一个步骤之前
+    if (executionStep?.status === 'completed') {
+      // 查找应该插入在当前步骤之后的用户输入请求
+      // 简单策略：如果这是最后一个已完成的步骤，或者请求时间戳在当前步骤之后
+      const currentStepTimestamp = executionStep.timestamp
+      const isLastCompletedStep = !planSteps.slice(index + 1).some(ps => {
+        const es = executionSteps.find(e => e.step === ps.step)
+        return es?.status === 'completed'
+      })
+      
+      // 查找未插入的用户输入请求
+      const pendingRequest = userInputRequests.find(request => {
+        if (insertedRequestIds.has(request.request_id)) {
+          return false // 已经插入过
+        }
+        
+        // 如果这是最后一个已完成的步骤，或者请求时间戳在当前步骤之后，则插入
+        if (isLastCompletedStep) {
+          return true
+        }
+        
+        const requestTimestamp = request.timestamp
+        return requestTimestamp && currentStepTimestamp && requestTimestamp >= currentStepTimestamp
+      })
+      
+      if (pendingRequest) {
+        insertedRequestIds.add(pendingRequest.request_id)
+        
+        // 查找对应的用户回复
+        const reply = userReplies.find(r => r.request_id === pendingRequest.request_id)
+        
+        // 插入用户输入请求步骤（包含用户回复，如果有的话）
+        const userInputStep: UnifiedStep = {
+          step: planStep.step + 0.5, // 使用小数步骤号，表示这是插入的步骤
+          action: reply ? '用户交互' : '请求用户输入',
+          target: reply ? reply.reply : pendingRequest.question,
+          status: reply ? 'completed' : 'running',
+          userInputRequest: pendingRequest,
+          userReply: reply,
+          timestamp: pendingRequest.timestamp,
+        }
+        
+        unifiedSteps.push(userInputStep)
+      }
+    }
+  })
+  
+  // 按步骤号排序
+  unifiedSteps.sort((a, b) => a.step - b.step)
+  
+  // 重新编号步骤，使其连续
+  unifiedSteps.forEach((step, index) => {
+    step.step = index + 1
+  })
+  
+  // 调试日志：检查步骤结果
+  unifiedSteps.forEach((step) => {
+    if (step.status === 'completed') {
+      console.log(`[UnifiedStepsBlock] Step ${step.step}:`, {
+        status: step.status,
+        hasResult: !!step.result,
+        hasError: !!step.error,
+        resultLength: step.result?.length || 0,
+        resultPreview: step.result?.substring(0, 100) || 'N/A',
+        isUserInteraction: !!(step.userInputRequest || step.userReply)
       })
     }
-    return mergedStep
   })
   
   // 调试日志：检查推理原因
@@ -185,18 +213,59 @@ export default function UnifiedStepsBlock({
           <ol className="unified-steps-list">
             {unifiedSteps.map((step, index) => {
               const isResultExpanded = expandedResults.has(step.step)
-              const hasResult = step.status === 'completed' || step.status === 'failed'
+              // 用户交互步骤的结果就是回复内容，不需要展开/收起
+              const hasResult = (!step.userInputRequest && !step.userReply) && 
+                                (step.status === 'completed' || step.status === 'failed')
               
               // 查找在当前步骤之前显示的推理原因
               // 推理原因应该显示在 after_step 之后，before_steps 的第一个步骤之前
-              // 只在该推理原因关联的第一个新步骤之前显示一次
+              // 但是，如果 after_step 之后有用户交互步骤，推理原因应该显示在用户交互步骤之后
               const reasoningBeforeThisStep = decisionReasonings.find(r => {
                 if (!r.reasoning || r.after_step === undefined || !r.before_steps || r.before_steps.length === 0) {
                   return false
                 }
-                // 检查当前步骤是否是该推理原因关联的第一个新步骤
-                const firstNewStep = Math.min(...r.before_steps)
-                return r.after_step < step.step && step.step === firstNewStep
+                
+                // 如果当前步骤是用户交互步骤，不显示推理原因
+                if (step.userInputRequest || step.userReply) {
+                  return false
+                }
+                
+                // 检查 after_step 对应的原始步骤号
+                const afterStepOriginalNumber = r.after_step
+                
+                // 查找 after_step 对应的步骤在 unifiedSteps 中的位置（非用户交互步骤）
+                const afterStepIndex = unifiedSteps.findIndex((s, idx) => 
+                  !s.userInputRequest && !s.userReply && s.step === afterStepOriginalNumber
+                )
+                
+                if (afterStepIndex < 0) {
+                  // 如果找不到 after_step 对应的步骤，使用原来的逻辑
+                  const firstNewStep = Math.min(...r.before_steps)
+                  return r.after_step < step.step && step.step === firstNewStep
+                }
+                
+                // 检查 after_step 之后是否有用户交互步骤
+                const userInteractionAfterIndex = unifiedSteps.findIndex((s, idx) => 
+                  idx > afterStepIndex && s.userInputRequest && s.userReply
+                )
+                
+                if (userInteractionAfterIndex >= 0) {
+                  // 如果有用户交互步骤，推理原因应该显示在用户交互步骤之后，第一个新步骤之前
+                  // 第一个新步骤是 before_steps 中的最小值
+                  const firstNewStep = Math.min(...r.before_steps)
+                  
+                  // 检查当前步骤是否是用户交互步骤之后的第一个新步骤
+                  // 当前步骤应该在用户交互步骤之后，且是第一个新步骤
+                  if (index > userInteractionAfterIndex && step.step === firstNewStep) {
+                    return true
+                  }
+                } else {
+                  // 如果没有用户交互步骤，使用原来的逻辑
+                  const firstNewStep = Math.min(...r.before_steps)
+                  return afterStepOriginalNumber < step.step && step.step === firstNewStep
+                }
+                
+                return false
               })
               
               // 调试日志
@@ -207,9 +276,16 @@ export default function UnifiedStepsBlock({
                 console.log(`[UnifiedStepsBlock] Showing reasoning before step ${step.step}:`, reasoningBeforeThisStep)
               }
               
+              // 检查是否应该在用户交互步骤之后显示推理原因
+              // 如果前一个步骤是用户交互步骤（已完成），且当前步骤是第一个新步骤，则显示推理原因
+              const prevStep = index > 0 ? unifiedSteps[index - 1] : null
+              const isAfterUserInteraction = prevStep?.userInputRequest && prevStep?.userReply && prevStep?.status === 'completed'
+              const shouldShowReasoningAfterInteraction = isAfterUserInteraction && reasoningBeforeThisStep
+              
               return (
                 <Fragment key={step.step}>
                   {/* 在当前步骤之前显示推理原因（只在第一个新步骤之前显示） */}
+                  {/* 如果前一个步骤是用户交互步骤，推理原因应该显示在用户交互步骤之后 */}
                   {reasoningBeforeThisStep && (
                     <li className="decision-reasoning-item">
                       <div className="decision-reasoning-section">
@@ -268,16 +344,43 @@ export default function UnifiedStepsBlock({
                       </Badge>
                     </div>
                     
-                    {/* Step Target */}
-                    {step.target && (
+                    {/* 用户输入请求步骤的特殊显示 */}
+                    {step.userInputRequest && (
+                      <div className="step-user-interaction-full">
+                        <div className="user-interaction-header">
+                          <MessageSquare size={16} className="interaction-icon" />
+                          <span className="interaction-title">Agent 提问</span>
+                        </div>
+                        <div className="user-request-display">
+                          <strong>问题：</strong>
+                          <p>{step.userInputRequest.question}</p>
+                          {step.userInputRequest.context && (
+                            <>
+                              <strong>上下文：</strong>
+                              <p>{step.userInputRequest.context}</p>
+                            </>
+                          )}
+                        </div>
+                        {step.userReply && (
+                          <div className="user-reply-display">
+                            <strong>您的回复：</strong>
+                            <p>{step.userReply.reply}</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    
+                    
+                    {/* Step Target - 只在非用户交互步骤中显示 */}
+                    {!step.userInputRequest && !step.userReply && step.target && (
                       <div className="step-target">
                         <span className="target-arrow">→</span>
                         <code className="target-code">{step.target}</code>
                       </div>
                     )}
                     
-                    {/* Step Result - 总是显示结果预览，可展开查看完整内容 */}
-                    {hasResult && (step.result || step.error) && (
+                    {/* Step Result - 只在非用户交互步骤中显示 */}
+                    {!step.userInputRequest && !step.userReply && hasResult && (step.result || step.error) && (
                       <div className="step-result-section">
                         {step.error ? (
                           <div className="step-error-container">
@@ -320,31 +423,6 @@ export default function UnifiedStepsBlock({
                             )}
                           </div>
                         ) : null}
-                      </div>
-                    )}
-                    
-                    {/* User Interaction Section - 用户交互作为步骤的一部分 */}
-                    {step.userInputRequest && (
-                      <div className="step-user-interaction">
-                        {step.userReply ? (
-                          // 如果已有回复，显示回复内容
-                          <>
-                            <div className="user-interaction-header">
-                              <MessageSquare size={16} className="interaction-icon" />
-                              <span className="interaction-title">用户输入</span>
-                            </div>
-                            <div className="user-reply-display">
-                              <strong>您的回复：</strong>
-                              <p>{step.userReply.reply}</p>
-                            </div>
-                          </>
-                        ) : (
-                          // 如果还没有回复，只显示一个简单的提示（完整内容在对话框中显示）
-                          <div className="user-interaction-pending">
-                            <MessageSquare size={14} className="interaction-icon" />
-                            <span className="pending-text">等待用户输入...</span>
-                          </div>
-                        )}
                       </div>
                     )}
                   </div>

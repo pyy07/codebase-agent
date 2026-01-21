@@ -84,13 +84,38 @@ function App() {
         allowTaint: true,
         backgroundColor: '#ffffff',
         logging: false,
-        // 忽略无法加载的图片
+        // 忽略无法加载的图片和对话框遮罩
         onclone: (clonedDoc) => {
           // 移除克隆文档中所有无法加载的图片
           const images = clonedDoc.querySelectorAll('img')
           images.forEach((img) => {
             if (!img.complete || img.naturalHeight === 0) {
               img.style.display = 'none'
+            }
+          })
+          
+          // 移除所有对话框遮罩层和对话框内容
+          // 方法1: 查找所有具有高 z-index 的 fixed 定位元素
+          const allElements = clonedDoc.querySelectorAll('*')
+          allElements.forEach((element) => {
+            const el = element as HTMLElement
+            const style = window.getComputedStyle(el)
+            const zIndex = parseInt(style.zIndex) || 0
+            const position = style.position
+            const backgroundColor = style.backgroundColor
+            
+            // 如果 z-index 很高（>= 9998）且是 fixed 定位，可能是对话框或遮罩层
+            if (position === 'fixed' && zIndex >= 9998) {
+              // 检查是否是遮罩层（全屏覆盖，有背景色和模糊效果）
+              const hasBackdropFilter = style.backdropFilter !== 'none' || 
+                                       el.getAttribute('style')?.includes('backdrop-filter') ||
+                                       el.getAttribute('style')?.includes('backdropFilter')
+              
+              // 如果是遮罩层（有模糊效果或半透明背景），隐藏它
+              if (hasBackdropFilter || 
+                  (backgroundColor !== 'rgba(0, 0, 0, 0)' && backgroundColor !== 'transparent')) {
+                el.style.display = 'none'
+              }
             }
           })
         }
@@ -218,8 +243,17 @@ function App() {
 
     // 更新步骤执行状态（根据 progress 推算当前执行的步骤）
     // 注意：只有当 progress 明确表示步骤进度时才更新，避免心跳消息（progress: 0.5, step: "processing"）覆盖已完成步骤的状态
+    // 如果分析已完成（有 result），不再根据 progress 更新步骤状态，避免将未执行的步骤标记为 completed
     if (progress > 0 && step === 'graph_execution') {
       updateAssistantMessage(contents => {
+        // 检查是否已有 result（分析已完成）
+        const hasResult = contents.some(c => c.type === 'result')
+        if (hasResult) {
+          // 分析已完成，不再根据 progress 更新步骤状态
+          // 未执行的步骤应该保持 pending 状态
+          return contents
+        }
+        
         const stepExecutionContent = contents.find(c => c.type === 'step_execution')
         let updatedContents = contents
         
@@ -235,9 +269,11 @@ function App() {
               return s
             }
             // 只更新 pending 或 running 状态的步骤
-            if (index < currentStepIndex) {
+            // 注意：当 progress 接近 1.0 时，不要将所有步骤都标记为 completed
+            // 只标记实际执行过的步骤（index < currentStepIndex）
+            if (index < currentStepIndex && progress < 1.0) {
               return { ...s, status: 'completed' as const }
-            } else if (index === currentStepIndex) {
+            } else if (index === currentStepIndex && progress < 1.0) {
               return { ...s, status: 'running' as const }
             }
             return s
@@ -260,9 +296,10 @@ function App() {
                     return step
                   }
                   // 只更新 pending 或 running 状态的步骤
-                  if (index < currentStepIndex) {
+                  // 注意：当 progress 接近 1.0 时，不要将所有步骤都标记为 completed
+                  if (index < currentStepIndex && progress < 1.0) {
                     return { ...step, status: 'completed' as const }
-                  } else if (index === currentStepIndex) {
+                  } else if (index === currentStepIndex && progress < 1.0) {
                     return { ...step, status: 'running' as const }
                   }
                   return step
