@@ -213,8 +213,60 @@ mypy codebase_driven_agent
 
 ### 运行测试
 
+#### 后端测试
+
 ```bash
+# 安装测试依赖（如果还没安装）
+pip install -e ".[dev]"
+
+# 运行所有测试
 pytest
+
+# 运行特定测试文件
+pytest tests/test_user_interaction.py
+
+# 运行特定测试类或函数
+pytest tests/test_user_interaction.py::TestGraphExecutorUserInteraction
+pytest tests/test_user_interaction.py::TestGraphExecutorUserInteraction::test_request_user_input_node
+
+# 显示详细输出
+pytest -v
+
+# 显示覆盖率
+pytest --cov=codebase_driven_agent --cov-report=html
+```
+
+#### 前端测试
+
+```bash
+# 进入前端目录
+cd web
+
+# 安装依赖（如果还没安装）
+npm install
+
+# 运行所有测试
+npm test
+
+# 运行测试并显示 UI（交互式）
+npm run test:ui
+
+# 运行测试并生成覆盖率报告
+npm run test:coverage
+
+# 运行特定测试文件
+npm test -- UserInputRequest.test.tsx
+```
+
+#### 运行用户交互功能测试
+
+```bash
+# 后端：运行用户交互相关测试
+pytest tests/test_user_interaction.py -v
+
+# 前端：运行用户交互组件测试
+cd web
+npm test -- UserInputRequest UserReply UnifiedStepsBlock
 ```
 
 ## 许可证

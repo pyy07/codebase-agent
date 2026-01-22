@@ -179,12 +179,104 @@ data: {"message": "开始分析...", "progress": 0.0, "step": "initializing"}
 event: progress
 data: {"message": "检索相关代码...", "progress": 0.4, "step": "searching_code"}
 
+event: user_input_request
+data: {"request_id": "unique-request-id", "question": "请提供具体的错误信息"}
+
 event: result
 data: {"root_cause": "...", "suggestions": [...], "confidence": 0.85}
 
 event: done
 data: {"message": "Analysis completed"}
 ```
+
+**SSE 事件类型**:
+- `progress`: 分析进度更新
+- `user_input_request`: Agent 请求用户输入（交互式分析）
+- `user_reply`: 用户回复确认
+- `result`: 最终分析结果
+- `done`: 分析完成
+
+### 8. 用户回复（交互式分析）
+
+**POST** `/api/v1/analyze/reply`
+
+当 Agent 在分析过程中请求用户输入时，使用此端点提交用户的回复，Agent 将基于回复继续分析。
+
+**请求体**:
+```json
+{
+  "request_id": "请求ID（来自 user_input_request 事件）",
+  "reply": "用户的回复内容"
+}
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "message": "回复已接收，Agent 将继续分析"
+}
+```
+
+**状态码**:
+- `200`: 成功
+- `400`: 请求参数错误（如 request_id 无效或已过期）
+- `404`: 未找到对应的会话（request_id 不存在）
+- `500`: 服务器内部错误
+
+**使用场景**:
+
+当使用流式分析接口（`/api/v1/analyze/stream`）时，如果 Agent 需要更多信息，会发送 `user_input_request` 事件：
+
+```json
+{
+  "event": "user_input_request",
+  "data": {
+    "request_id": "unique-request-id",
+    "question": "请提供具体的错误信息或错误日志"
+  }
+}
+```
+
+收到此事件后，调用 `/api/v1/analyze/reply` 提交回复，Agent 将继续分析。
+
+**示例**:
+
+```bash
+# 提交用户回复
+curl -X POST http://localhost:8000/api/v1/analyze/reply \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "request_id": "unique-request-id",
+    "reply": "错误发生在 2024-01-01 10:00:00，错误信息是 Connection refused"
+  }'
+```
+
+```python
+# Python 示例
+import requests
+
+response = requests.post(
+    "http://localhost:8000/api/v1/analyze/reply",
+    headers={
+        "Content-Type": "application/json",
+        "X-API-Key": "your-api-key"
+    },
+    json={
+        "request_id": "unique-request-id",
+        "reply": "错误发生在 2024-01-01 10:00:00，错误信息是 Connection refused"
+    }
+)
+result = response.json()
+print(result)  # {"success": true, "message": "回复已接收，Agent 将继续分析"}
+```
+
+**注意事项**:
+- `request_id` 来自 `user_input_request` 事件，必须匹配
+- 会话会在 30 分钟后自动过期，过期后无法提交回复
+- 支持多次交互，Agent 可能会多次请求用户输入
+- 如果用户无法提供信息，可以关闭对话框或等待超时，Agent 将基于已有信息继续分析
 
 ## 错误处理
 

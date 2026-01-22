@@ -98,6 +98,52 @@ java.sql.SQLException: Connection refused
 1. 分析代码片段
 2. 搜索相关的代码上下文
 3. 查找相关的日志和性能指标
+
+### 场景4：交互式分析（Agent 主动询问）
+
+**使用场景**:
+当 Agent 发现信息不足时，会主动暂停并请求用户提供额外信息。
+
+**流程示例**:
+
+1. **用户提交问题**:
+```
+我的代码出错了，帮我看看
+```
+
+2. **Agent 分析并发现信息不足**:
+Agent 会通过 SSE 发送 `user_input_request` 事件：
+```json
+{
+  "event": "user_input_request",
+  "data": {
+    "request_id": "unique-request-id",
+    "question": "请提供具体的错误信息或错误日志，以便我更好地分析问题"
+  }
+}
+```
+
+3. **用户回复**:
+通过 `/api/v1/analyze/reply` 端点提交回复：
+```bash
+curl -X POST http://localhost:8000/api/v1/analyze/reply \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request_id": "unique-request-id",
+    "reply": "错误信息：Connection refused，发生在数据库连接时"
+  }'
+```
+
+4. **Agent 继续分析**:
+基于用户提供的信息，Agent 继续分析并给出结果。
+
+**Web UI 使用**:
+在 Web UI 中，当 Agent 请求用户输入时，会自动弹出对话框，用户可以直接在对话框中输入回复，无需手动调用 API。
+
+**注意事项**:
+- Agent 可能会多次请求用户输入，以获取更完整的信息
+- 如果用户无法提供信息，可以关闭对话框，Agent 将基于已有信息继续分析
+- 会话会在 30 分钟后自动过期
 4. 提供代码解释和性能优化建议
 
 ## API 使用示例
@@ -153,6 +199,55 @@ class CodebaseAgentClient:
         )
         response.raise_for_status()
         return response.json()
+    
+    def reply_to_agent(self, request_id, reply):
+        """回复 Agent 的询问（交互式分析）"""
+        response = requests.post(
+            f"{self.base_url}/api/v1/analyze/reply",
+            headers=self.headers,
+            json={
+                "request_id": request_id,
+                "reply": reply
+            }
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    def analyze_stream(self, input_text, context_files=None, on_progress=None, on_user_input=None):
+        """流式分析（支持交互）"""
+        import sseclient
+        
+        data = {"input": input_text}
+        if context_files:
+            data["context_files"] = context_files
+        
+        response = requests.post(
+            f"{self.base_url}/api/v1/analyze/stream",
+            headers=self.headers,
+            json=data,
+            stream=True
+        )
+        response.raise_for_status()
+        
+        client = sseclient.SSEClient(response)
+        result = None
+        
+        for event in client.events():
+            if event.event == "progress":
+                if on_progress:
+                    on_progress(json.loads(event.data))
+            elif event.event == "user_input_request":
+                data = json.loads(event.data)
+                if on_user_input:
+                    reply = on_user_input(data["question"])
+                    if reply:
+                        self.reply_to_agent(data["request_id"], reply)
+            elif event.event == "result":
+                result = json.loads(event.data)
+            elif event.event == "done":
+                break
+        
+        return result
 
 # 使用示例
 client = CodebaseAgentClient(api_key="your-api-key")
@@ -173,6 +268,20 @@ while True:
         print(status)
         break
     time.sleep(1)
+
+# 流式分析（支持交互）
+def handle_user_input(question):
+    """处理 Agent 的询问"""
+    print(f"Agent 询问: {question}")
+    reply = input("请输入回复（或按 Enter 跳过）: ")
+    return reply if reply else None
+
+result = client.analyze_stream(
+    "我的代码出错了，帮我看看",
+    on_progress=lambda data: print(f"进度: {data.get('progress', 0):.1%} - {data.get('message', '')}"),
+    on_user_input=handle_user_input
+)
+print("分析结果:", result)
 ```
 
 ## 上下文文件使用
