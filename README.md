@@ -269,6 +269,43 @@ cd web
 npm test -- UserInputRequest UserReply UnifiedStepsBlock
 ```
 
+### 生成推广视频
+
+项目使用 Remotion 制作推广视频。视频项目位于 `web/src/video/` 目录。
+
+#### 开发视频
+
+```bash
+cd web
+
+# 启动 Remotion Studio（开发环境）
+npm run video:dev
+
+# Studio 会在浏览器中打开，可以实时预览和编辑视频
+```
+
+#### 导出视频
+
+```bash
+cd web
+
+# 导出 MP4 视频（默认 1920x1080，30fps）
+npm run video:render
+
+# 视频将导出到 web/out/video.mp4
+```
+
+#### 自定义视频导出
+
+```bash
+cd web
+
+# 使用 Remotion CLI 自定义导出参数
+npx remotion render PromoVideo out/custom-video.mp4 --codec=h264 --crf=18 --pixel-format=yuv420p
+```
+
+更多 Remotion 使用说明请参考 [Remotion 文档](https://www.remotion.dev/docs)。
+
 ## 许可证
 
 MIT License

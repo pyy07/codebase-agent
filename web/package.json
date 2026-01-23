@@ -10,7 +10,15 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "test": "vitest",
     "test:ui": "vitest --ui",
-    "test:coverage": "vitest --coverage"
+    "test:coverage": "vitest --coverage",
+    "video:dev": "remotion studio",
+    "video:render": "remotion render PromoVideo out/video.mp4",
+    "video:render:hq": "remotion render PromoVideo out/promo-hq.mp4 --codec=h264 --crf=18 --pixel-format=yuv420p",
+    "video:render:medium": "remotion render PromoVideo out/promo-medium.mp4 --codec=h264 --crf=23 --pixel-format=yuv420p",
+    "video:render:webm": "remotion render PromoVideo out/promo.webm --codec=vp9 --crf=30",
+    "video:export:all": "bash scripts/export-videos.sh || powershell -ExecutionPolicy Bypass -File scripts/export-videos.ps1",
+    "video:test": "node scripts/test-video.js || powershell -ExecutionPolicy Bypass -File scripts/test-video.ps1",
+    "video:preview": "remotion preview"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.2.12",
@@ -19,6 +27,8 @@
     "@radix-ui/react-slot": "^1.2.4",
     "@radix-ui/react-switch": "^1.2.6",
     "@radix-ui/react-tabs": "^1.1.13",
+    "@remotion/bundler": "^4.0.409",
+    "@remotion/cli": "^4.0.409",
     "@types/node": "^25.0.9",
     "@types/react-syntax-highlighter": "^15.5.0",
     "axios": "^1.6.0",
@@ -32,6 +42,7 @@
     "react-dom": "^18.2.0",
     "react-markdown": "^9.0.0",
     "react-syntax-highlighter": "^15.5.0",
+    "remotion": "^4.0.409",
     "tailwind-merge": "^3.4.0",
     "tailwindcss-animate": "^1.0.7"
   },
