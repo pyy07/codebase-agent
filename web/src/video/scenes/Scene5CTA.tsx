@@ -7,12 +7,12 @@ interface Scene5CTAProps {
 }
 
 export const Scene5CTA: React.FC<Scene5CTAProps> = ({ frame }) => {
-  const opacity = interpolate(frame, [0, 30, 240, 270], [0, 1, 1, 0], {
+  const opacity = interpolate(frame, [0, 15, 120, 135], [0, 1, 1, 0], {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
   })
 
-  const scale = interpolate(frame, [0, 60], [0.9, 1], {
+  const scale = interpolate(frame, [0, 30], [0.9, 1], {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
   })

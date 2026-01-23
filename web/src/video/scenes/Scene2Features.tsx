@@ -15,12 +15,12 @@ const features = [
 ]
 
 export const Scene2Features: React.FC<Scene2FeaturesProps> = ({ frame }) => {
-  const opacity = interpolate(frame, [0, 30, 240, 270], [0, 1, 1, 0], {
+  const opacity = interpolate(frame, [0, 15, 120, 135], [0, 1, 1, 0], {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
   })
 
-  const yOffset = interpolate(frame, [0, 60], [50, 0], {
+  const yOffset = interpolate(frame, [0, 30], [50, 0], {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
   })
@@ -66,7 +66,7 @@ export const Scene2Features: React.FC<Scene2FeaturesProps> = ({ frame }) => {
             title={feature.title}
             description={feature.desc}
             frame={frame}
-            startFrame={60 + index * 30}
+            startFrame={30 + index * 15}
           />
         ))}
       </div>

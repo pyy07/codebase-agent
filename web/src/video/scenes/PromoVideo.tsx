@@ -7,7 +7,7 @@ import { Scene4TechStack } from './Scene4TechStack'
 import { Scene5CTA } from './Scene5CTA'
 import { BackgroundAudio } from '../components/BackgroundAudio'
 
-const SCENE_DURATION = 300 // 每个场景 10 秒 @ 30fps
+const SCENE_DURATION = 150 // 每个场景 5 秒 @ 30fps
 
 /**
  * 主视频组件

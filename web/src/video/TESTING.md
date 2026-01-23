@@ -242,6 +242,95 @@ Write-Host "=== 测试完成 ==="
 3. 查看详细日志：`--log=verbose`
 4. 尝试降低并发数：`--concurrency=2`
 
+### Chrome Headless Shell 下载失败或浏览器启动失败
+
+如果遇到 `ECONNRESET` 或 "Old Headless mode has been removed" 错误，说明：
+
+1. **网络问题**：无法从 Google 服务器下载 Chrome Headless Shell
+2. **浏览器版本问题**：本地 Chrome 版本太新，已移除旧的 Headless 模式
+
+#### 方案 1：手动下载 Chrome Headless Shell（推荐）
+
+**步骤：**
+
+1. **确定平台和架构**
+   ```bash
+   # macOS ARM64 (Apple Silicon)
+   uname -m  # 应该显示 arm64
+   
+   # macOS x64 (Intel)
+   uname -m  # 应该显示 x86_64
+   ```
+
+2. **下载对应版本**
+   - 访问：https://googlechromelabs.github.io/chrome-for-testing/
+   - 或直接下载链接（macOS ARM64）：
+     ```
+     https://storage.googleapis.com/chrome-for-testing-public/134.0.6998.35/mac-arm64/chrome-headless-shell-mac-arm64.zip
+     ```
+   - 或使用国内镜像（如果可用）
+
+3. **解压并放置到正确位置**
+   ```bash
+   cd web
+   
+   # 创建目录
+   mkdir -p node_modules/.remotion/chrome-headless-shell/mac-arm64
+   
+   # 解压下载的 zip 文件
+   unzip ~/Downloads/chrome-headless-shell-mac-arm64.zip -d /tmp/
+   
+   # 复制到正确位置
+   cp -r /tmp/chrome-headless-shell-mac-arm64/* node_modules/.remotion/chrome-headless-shell/mac-arm64/
+   
+   # 确保可执行权限
+   chmod +x node_modules/.remotion/chrome-headless-shell/mac-arm64/chrome-headless-shell
+   ```
+
+4. **验证安装**
+   ```bash
+   ls -la node_modules/.remotion/chrome-headless-shell/mac-arm64/chrome-headless-shell
+   ```
+
+#### 方案 2：使用代理下载
+
+如果使用代理，设置环境变量：
+
+```bash
+# 设置代理（根据你的代理配置调整）
+export HTTP_PROXY=http://127.0.0.1:7890
+export HTTPS_PROXY=http://127.0.0.1:7890
+
+# 然后重试
+npx remotion browser ensure
+```
+
+#### 方案 3：使用 VPN 或更换网络
+
+网络连接问题可能是暂时的，可以：
+1. 使用 VPN 连接
+2. 更换网络环境（如使用手机热点）
+3. 多次重试命令
+
+#### 方案 4：使用详细日志调试
+
+```bash
+npx remotion render PromoVideo out/video.mp4 --log=verbose
+```
+
+这会显示更详细的错误信息，帮助定位问题。
+
+#### 方案 5：检查浏览器路径配置
+
+如果手动下载后仍然失败，检查 `remotion.config.ts` 配置：
+
+```typescript
+// 如果手动下载了 chrome-headless-shell，可以指定路径
+Config.setBrowserExecutable(
+  './node_modules/.remotion/chrome-headless-shell/mac-arm64/chrome-headless-shell'
+)
+```
+
 ### 视频质量问题
 
 1. 检查 CRF 值（较低值 = 更高质量）

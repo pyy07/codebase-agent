@@ -18,7 +18,7 @@ export const FeatureCard: React.FC<FeatureCardProps> = ({
 }) => {
   const opacity = interpolate(
     frame,
-    [startFrame, startFrame + 30],
+    [startFrame, startFrame + 15],
     [0, 1],
     {
       extrapolateLeft: 'clamp',
@@ -28,7 +28,7 @@ export const FeatureCard: React.FC<FeatureCardProps> = ({
 
   const scale = interpolate(
     frame,
-    [startFrame, startFrame + 30],
+    [startFrame, startFrame + 15],
     [0.9, 1],
     {
       extrapolateLeft: 'clamp',

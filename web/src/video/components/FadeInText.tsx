@@ -22,7 +22,7 @@ export const FadeInText: React.FC<FadeInTextProps> = ({
 }) => {
   const opacity = interpolate(
     frame,
-    [startFrame, startFrame + 30],
+    [startFrame, startFrame + 15],
     [0, 1],
     {
       extrapolateLeft: 'clamp',
@@ -32,7 +32,7 @@ export const FadeInText: React.FC<FadeInTextProps> = ({
 
   const yOffset = interpolate(
     frame,
-    [startFrame, startFrame + 30],
+    [startFrame, startFrame + 15],
     [20, 0],
     {
       extrapolateLeft: 'clamp',

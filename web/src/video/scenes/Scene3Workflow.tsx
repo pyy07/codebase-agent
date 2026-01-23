@@ -14,7 +14,7 @@ const steps = [
 ]
 
 export const Scene3Workflow: React.FC<Scene3WorkflowProps> = ({ frame }) => {
-  const opacity = interpolate(frame, [0, 30, 240, 270], [0, 1, 1, 0], {
+  const opacity = interpolate(frame, [0, 15, 120, 135], [0, 1, 1, 0], {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
   })
@@ -53,7 +53,7 @@ export const Scene3Workflow: React.FC<Scene3WorkflowProps> = ({ frame }) => {
         {steps.map((item, index) => {
           const stepOpacity = interpolate(
             frame,
-            [index * 50, index * 50 + 30],
+            [index * 25, index * 25 + 15],
             [0, 1],
             {
               extrapolateLeft: 'clamp',
@@ -63,7 +63,7 @@ export const Scene3Workflow: React.FC<Scene3WorkflowProps> = ({ frame }) => {
 
           const stepScale = interpolate(
             frame,
-            [index * 50, index * 50 + 30],
+            [index * 25, index * 25 + 15],
             [0.8, 1],
             {
               extrapolateLeft: 'clamp',

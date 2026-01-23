@@ -21,7 +21,7 @@ export const Scene1Intro: React.FC<Scene1IntroProps> = ({ frame, fps }) => {
     to: 1,
   })
 
-  const opacity = interpolate(frame, [0, 30, 150, 180], [0, 1, 1, 0], {
+  const opacity = interpolate(frame, [0, 15, 75, 90], [0, 1, 1, 0], {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
   })
@@ -50,7 +50,7 @@ export const Scene1Intro: React.FC<Scene1IntroProps> = ({ frame, fps }) => {
       <FadeInText
         text="Codebase Driven Agent"
         frame={frame}
-        startFrame={60}
+        startFrame={30}
         fontSize={64}
         fontWeight={700}
         color="#ffffff"
@@ -58,7 +58,7 @@ export const Scene1Intro: React.FC<Scene1IntroProps> = ({ frame, fps }) => {
       <FadeInText
         text="基于代码库驱动的通用 AI Agent 平台"
         frame={frame}
-        startFrame={120}
+        startFrame={60}
         fontSize={32}
         fontWeight={400}
         color="#ffffff"

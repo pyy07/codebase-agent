@@ -12,6 +12,7 @@
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage",
     "video:dev": "remotion studio",
+    "video:setup-browser": "bash scripts/setup-chrome-headless.sh",
     "video:render": "remotion render PromoVideo out/video.mp4",
     "video:render:hq": "remotion render PromoVideo out/promo-hq.mp4 --codec=h264 --crf=18 --pixel-format=yuv420p",
     "video:render:medium": "remotion render PromoVideo out/promo-medium.mp4 --codec=h264 --crf=23 --pixel-format=yuv420p",
