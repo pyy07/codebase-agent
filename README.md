@@ -142,6 +142,36 @@ npm run dev
 
 详细说明请查看 [Web UI 启动指南](docs/WEB_UI.md)
 
+### 启动桌面应用（可选）
+
+项目支持打包为桌面应用，提供原生桌面体验。
+
+#### 开发模式运行桌面应用
+
+```bash
+cd web
+npm install  # 如果还没安装依赖
+npm run electron:dev
+```
+
+#### 构建桌面应用
+
+```bash
+# 使用构建脚本（推荐）
+./scripts/build-desktop.sh [platform]
+
+# 或使用 npm 脚本
+cd web
+npm run electron:build
+```
+
+支持的平台：
+- Windows (NSIS 安装程序)
+- macOS (DMG 磁盘镜像)
+- Linux (AppImage)
+
+详细说明请查看 [桌面应用指南](docs/DESKTOP_APP.md)
+
 ## 项目结构
 
 ```
@@ -189,6 +219,7 @@ codebase_driven_agent/
 - [配置说明](docs/CONFIG.md) - 详细的配置选项说明
 - [示例场景](docs/EXAMPLES.md) - 常见问题分析场景示例
 - [Web UI 启动指南](docs/WEB_UI.md) - Web UI 启动和使用说明
+- [桌面应用指南](docs/DESKTOP_APP.md) - 桌面应用开发、构建和使用说明
 - [开发者扩展文档](docs/DEVELOPMENT.md) - 如何扩展功能和添加新工具
 - [SETUP.md](SETUP.md) - 项目设置指南
 - [TESTING.md](TESTING.md) - 测试指南

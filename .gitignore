@@ -59,6 +59,16 @@ web/dist/
 web/build/
 *.egg-info/
 
+# Electron build outputs
+web/release/
+web/out/
+*.dmg
+*.exe
+*.AppImage
+*.deb
+*.rpm
+*.snap
+
 # OS
 .DS_Store
 Thumbs.db

@@ -3,14 +3,19 @@
   "version": "0.1.0",
   "description": "Codebase Driven Agent Web UI",
   "private": true,
+  "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "vite build && node scripts/fix-electron-paths.js",
+    "build:check": "tsc && vite build",
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage",
+    "electron:dev": "concurrently -k \"npm run dev\" \"wait-on http://localhost:3000 && electron .\"",
+    "electron:build": "npm run build && electron-builder",
+    "electron:pack": "npm run build && electron-builder --dir",
     "video:dev": "remotion studio",
     "video:setup-browser": "bash scripts/setup-chrome-headless.sh",
     "video:render": "remotion render PromoVideo out/video.mp4",
@@ -58,6 +63,9 @@
     "@vitejs/plugin-react": "^4.2.1",
     "@vitest/ui": "^1.0.4",
     "autoprefixer": "^10.4.23",
+    "concurrently": "^9.1.0",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
     "eslint": "^8.55.0",
     "eslint-plugin-react-hooks": "^4.6.0",
     "eslint-plugin-react-refresh": "^0.4.5",
@@ -66,6 +74,63 @@
     "tailwindcss": "^4.1.18",
     "typescript": "^5.2.2",
     "vite": "^5.0.8",
-    "vitest": "^1.0.4"
+    "vitest": "^1.0.4",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.codebase-agent.app",
+    "productName": "Codebase Agent",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "node_modules/**/*",
+      "!node_modules/**/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!node_modules/**/{test,__tests__,tests,powered-test,example,examples}",
+      "!node_modules/**/*.d.ts",
+      "!node_modules/**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "../codebase_driven_agent",
+        "to": "codebase_driven_agent",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../run_backend.py",
+        "to": "run_backend.py"
+      },
+      {
+        "from": "../requirements.txt",
+        "to": "requirements.txt"
+      },
+      {
+        "from": "../pyproject.toml",
+        "to": "pyproject.toml"
+      }
+    ],
+    "win": {
+      "target": ["nsis"],
+      "icon": "build/icon.ico"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "icon": "build/icon.png",
+      "category": "Development"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }
