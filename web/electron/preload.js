@@ -8,4 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     chrome: process.versions.chrome,
     electron: process.versions.electron,
   },
+  // 暴露后端 API 基础 URL
+  // 在 Electron 打包应用中，前端通过 file:// 协议加载，需要完整的 URL
+  apiBaseURL: 'http://localhost:8000',
 })

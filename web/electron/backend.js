@@ -1,6 +1,9 @@
-const { spawn, execSync } = require('child_process')
+const { spawn, execSync, exec } = require('child_process')
 const path = require('path')
 const http = require('http')
+const { promisify } = require('util')
+
+const execAsync = promisify(exec)
 
 class BackendManager {
   constructor() {
@@ -8,6 +11,7 @@ class BackendManager {
     this.backendPort = 8000
     this.pythonPath = null
     this.backendReady = false
+    this.isStopping = false // 防止重复调用 stop
   }
 
   /**
@@ -192,11 +196,22 @@ class BackendManager {
       PYTHONUNBUFFERED: '1',
       PATH: (process.env.PATH || '') + ':/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin',
     }
-    this.process = spawn(this.pythonPath, [backendScript], {
+    // 使用 detached: false 确保子进程随父进程退出
+    // 在 Windows 上，使用 detached: false 和 createNoWindow: true
+    // 在 Unix 上，确保进程在同一个进程组中
+    const spawnOptions = {
       cwd: backendDir,
       stdio: 'pipe',
       env,
-    })
+      detached: false, // 确保子进程随父进程退出
+    }
+
+    // Windows 特定选项
+    if (process.platform === 'win32') {
+      spawnOptions.windowsHide = true
+    }
+
+    this.process = spawn(this.pythonPath, [backendScript], spawnOptions)
 
     // 处理 stdout
     this.process.stdout.on('data', (data) => {
@@ -236,37 +251,163 @@ class BackendManager {
   }
 
   /**
+   * 通过端口查找并终止后端进程
+   */
+  async killProcessByPort(port) {
+    const platform = process.platform
+    let command
+
+    if (platform === 'win32') {
+      // Windows: 使用 netstat 和 taskkill
+      command = `netstat -ano | findstr :${port} | findstr LISTENING`
+      try {
+        const { stdout } = await execAsync(command)
+        const lines = stdout.trim().split('\n')
+        const pids = new Set()
+        for (const line of lines) {
+          const parts = line.trim().split(/\s+/)
+          if (parts.length > 0) {
+            const pid = parts[parts.length - 1]
+            if (pid && !isNaN(pid)) {
+              pids.add(pid)
+            }
+          }
+        }
+        for (const pid of pids) {
+          try {
+            await execAsync(`taskkill /F /PID ${pid}`)
+            console.log(`Killed process ${pid} on port ${port}`)
+          } catch (error) {
+            console.error(`Error killing process ${pid}:`, error.message)
+          }
+        }
+      } catch (error) {
+        // 如果没有找到进程，忽略错误
+        if (!error.message.includes('findstr')) {
+          console.error('Error finding process by port:', error.message)
+        }
+      }
+    } else {
+      // macOS/Linux: 使用 lsof 或 netstat
+      try {
+        // 尝试使用 lsof
+        const { stdout } = await execAsync(`lsof -ti :${port}`)
+        const pids = stdout.trim().split('\n').filter(pid => pid)
+        for (const pid of pids) {
+          try {
+            // 先尝试 SIGTERM
+            await execAsync(`kill -TERM ${pid}`)
+            console.log(`Sent SIGTERM to process ${pid} on port ${port}`)
+            
+            // 等待一下，如果还没退出就强制杀死
+            await new Promise(resolve => setTimeout(resolve, 1000))
+            try {
+              await execAsync(`kill -0 ${pid}`) // 检查进程是否还存在
+              // 进程还存在，强制杀死
+              await execAsync(`kill -KILL ${pid}`)
+              console.log(`Force killed process ${pid} on port ${port}`)
+            } catch (e) {
+              // 进程已经退出，很好
+            }
+          } catch (error) {
+            console.error(`Error killing process ${pid}:`, error.message)
+          }
+        }
+      } catch (error) {
+        // 如果没有找到进程，忽略错误
+        if (!error.message.includes('lsof')) {
+          console.error('Error finding process by port:', error.message)
+        }
+      }
+    }
+  }
+
+  /**
    * 停止后端进程
    */
   async stop() {
-    if (this.process) {
-      console.log('Stopping backend process...')
-      this.process.kill('SIGTERM')
+    // 防止重复调用
+    if (this.isStopping) {
+      console.log('Backend stop already in progress')
+      return
+    }
 
-      // 等待进程退出，最多等待 5 秒
-      await new Promise((resolve) => {
-        if (!this.process) {
-          resolve()
-          return
-        }
+    this.isStopping = true
+    this.backendReady = false
 
-        const timeout = setTimeout(() => {
-          if (this.process) {
-            console.log('Force killing backend process...')
-            this.process.kill('SIGKILL')
+    try {
+      // 1. 如果有直接管理的进程，先停止它
+      if (this.process) {
+        const processToStop = this.process
+        this.process = null // 立即清空引用
+
+        console.log('Stopping managed backend process...')
+
+        // 检查进程是否已经退出
+        if (!processToStop.killed && processToStop.exitCode === null) {
+          try {
+            // 先尝试优雅退出（SIGTERM）
+            processToStop.kill('SIGTERM')
+
+            // 等待进程退出，最多等待 3 秒
+            await new Promise((resolve) => {
+              const timeout = setTimeout(() => {
+                // 超时后强制杀死进程
+                try {
+                  if (!processToStop.killed && processToStop.exitCode === null) {
+                    console.log('Force killing managed backend process (timeout)...')
+                    processToStop.kill('SIGKILL')
+                  }
+                } catch (error) {
+                  console.error('Error force killing process:', error)
+                }
+                resolve()
+              }, 3000)
+
+              // 监听进程退出事件
+              const onExit = () => {
+                clearTimeout(timeout)
+                processToStop.removeListener('exit', onExit)
+                processToStop.removeListener('error', onError)
+                resolve()
+              }
+
+              // 监听进程错误事件
+              const onError = (error) => {
+                clearTimeout(timeout)
+                processToStop.removeListener('exit', onExit)
+                processToStop.removeListener('error', onError)
+                console.error('Error stopping backend process:', error)
+                resolve() // 即使出错也继续
+              }
+
+              processToStop.once('exit', onExit)
+              processToStop.once('error', onError)
+
+              // 如果进程已经退出，立即解析
+              if (processToStop.killed || processToStop.exitCode !== null) {
+                clearTimeout(timeout)
+                processToStop.removeListener('exit', onExit)
+                processToStop.removeListener('error', onError)
+                resolve()
+              }
+            })
+          } catch (error) {
+            console.error('Error stopping managed process:', error)
           }
-          resolve()
-        }, 5000)
+        }
+      }
 
-        this.process.on('exit', () => {
-          clearTimeout(timeout)
-          resolve()
-        })
-      })
+      // 2. 无论是否有直接管理的进程，都尝试通过端口查找并终止后端进程
+      // 这样可以处理后端进程不是当前实例启动的情况
+      console.log('Killing backend process by port...')
+      await this.killProcessByPort(this.backendPort)
 
-      this.process = null
-      this.backendReady = false
       console.log('Backend process stopped')
+    } catch (error) {
+      console.error('Error stopping backend process:', error)
+    } finally {
+      this.isStopping = false
     }
   }
 

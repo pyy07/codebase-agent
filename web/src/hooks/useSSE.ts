@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { PlanStep, StepExecutionData, DecisionReasoningData, UserInputRequestData, UserReplyData } from '../types'
+import { buildApiUrl } from '../utils/api'
 
 export interface SSEMessage {
   event: string
@@ -26,6 +27,7 @@ export function useSSE(url: string, body: any, options: UseSSEOptions = {}) {
   const connectionIdRef = useRef<number>(0) // 用于跟踪连接ID，确保每次都是新连接
 
   useEffect(() => {
+    // 如果 url 为空，不建立连接
     if (!url || !body) {
       // 清空状态，确保可以重新连接
       setIsConnected(false)
@@ -77,7 +79,9 @@ export function useSSE(url: string, body: any, options: UseSSEOptions = {}) {
 
     const connectSSE = async () => {
       try {
-        console.log('Starting SSE connection:', { url, bodyString, connectionId: connectionIdRef.current })
+        // 构建完整的 API URL（在 Electron 环境中会添加 base URL）
+        const fullUrl = buildApiUrl(url)
+        console.log('Starting SSE connection:', { url, fullUrl, bodyString, connectionId: connectionIdRef.current })
         setIsConnected(true)
         setError(null)
 
@@ -91,7 +95,7 @@ export function useSSE(url: string, body: any, options: UseSSEOptions = {}) {
           headers['X-API-Key'] = apiKey
         }
 
-        const response = await fetch(url, {
+        const response = await fetch(fullUrl, {
           method: 'POST',
           headers,
           body: bodyString,

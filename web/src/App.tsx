@@ -6,6 +6,7 @@ import MessageList from './components/MessageList'
 import ChatInput from './components/ChatInput'
 import { ChatMessage, MessageContent, PlanStep, AttachedFile, AnalysisResult, StepExecutionData, DecisionReasoningData, UserInputRequestData, UserReplyData } from './types'
 import { useSSE } from './hooks/useSSE'
+import { buildApiUrl } from './utils/api'
 import html2canvas from 'html2canvas'
 import './App.css'
 
@@ -567,12 +568,13 @@ function App() {
     }
 
     const endpoint = isSkip ? '/api/v1/analyze/skip' : '/api/v1/analyze/reply'
+    const fullUrl = buildApiUrl(endpoint)
     const body = isSkip 
       ? JSON.stringify({ request_id: requestId })
       : JSON.stringify({ request_id: requestId, reply })
 
     // 异步发送请求，不等待响应（后端会在后台处理并通过 SSE 流式返回结果）
-    fetch(endpoint, {
+    fetch(fullUrl, {
       method: 'POST',
       headers,
       body,

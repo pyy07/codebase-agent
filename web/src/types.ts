@@ -114,3 +114,20 @@ export interface AttachedFile {
   preview?: string  // For images
   size: number
 }
+
+// Electron API 类型定义
+export interface ElectronAPI {
+  platform: string
+  versions: {
+    node: string
+    chrome: string
+    electron: string
+  }
+  apiBaseURL: string
+}
+
+declare global {
+  interface Window {
+    electronAPI?: ElectronAPI
+  }
+}

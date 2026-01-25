@@ -7,6 +7,7 @@ const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
 let mainWindow = null
 let backendManager = null
+let isQuitting = false // 防止退出事件重复触发
 
 // 设置日志文件路径
 const logDir = path.join(app.getPath('userData'), 'logs')
@@ -72,6 +73,9 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
+      // 在生产模式下禁用 webSecurity，允许 file:// 协议访问 localhost
+      // 这对于 Electron 桌面应用是安全的，因为我们只访问本地后端服务
+      webSecurity: isDev, // 开发模式保持安全，生产模式禁用以允许访问 localhost
     },
     // icon: path.join(__dirname, '../build/icon.png'), // 可选：应用图标（需要时取消注释）
     show: false, // 先不显示，等后端启动后再显示
@@ -127,6 +131,8 @@ function createWindow() {
   mainWindow.on('closed', () => {
     log('Window closed')
     mainWindow = null
+    // 注意：在 macOS 上，关闭窗口不会退出应用，后端进程应该继续运行
+    // 只有在应用退出时（通过 Cmd+Q 或系统退出）才会清理后端
   })
 
   // 处理窗口加载完成
@@ -245,6 +251,9 @@ app.on('window-all-closed', () => {
     if (backendManager) {
       backendManager.stop().then(() => {
         app.quit()
+      }).catch((error) => {
+        log(`Error stopping backend on window-all-closed: ${error.message}`, 'ERROR')
+        app.quit()
       })
     } else {
       app.quit()
@@ -253,21 +262,79 @@ app.on('window-all-closed', () => {
 })
 
 // 应用退出前清理
+// 使用 before-quit 来阻止退出并清理资源
 app.on('before-quit', async (event) => {
+  // 如果已经在退出过程中，直接返回，不阻止退出
+  if (isQuitting) {
+    return
+  }
+
+  log('before-quit event triggered')
+  
+  // 如果有后端需要清理，阻止默认退出，先清理
   if (backendManager) {
     event.preventDefault()
-    await backendManager.stop()
-    app.quit()
+    isQuitting = true // 立即设置标志，防止重复触发
+    
+    try {
+      await backendManager.stop()
+      log('Backend stopped in before-quit')
+    } catch (error) {
+      log(`Error stopping backend in before-quit: ${error.message}`, 'ERROR')
+    }
+    
+    // 清理完成后，允许退出（不调用 app.quit()，让事件自然继续）
+    // 由于 isQuitting 已设置，下次 before-quit 触发时会直接返回
+    // 应用会自然退出
+  } else {
+    // 没有后端需要清理，直接允许退出
+    isQuitting = true
+  }
+})
+
+// will-quit 事件：最后的清理机会
+// 注意：如果 before-quit 中调用了 event.preventDefault()，will-quit 也会被触发
+app.on('will-quit', async (event) => {
+  // 如果已经在退出过程中，直接返回
+  if (isQuitting) {
+    return
+  }
+
+  log('will-quit event triggered')
+  isQuitting = true
+  
+  // 如果后端还没清理，在这里清理（作为最后的保障）
+  if (backendManager) {
+    event.preventDefault()
+    try {
+      await backendManager.stop()
+      log('Backend stopped in will-quit')
+    } catch (error) {
+      log(`Error stopping backend in will-quit: ${error.message}`, 'ERROR')
+    }
+    // 清理完成后，允许退出
   }
 })
 
 // 处理未捕获的异常
-process.on('uncaughtException', (error) => {
+process.on('uncaughtException', async (error) => {
   log(`Uncaught exception: ${error.message}\n${error.stack}`, 'ERROR')
+  
+  // 清理后端进程
+  if (backendManager) {
+    try {
+      await backendManager.stop()
+    } catch (stopError) {
+      log(`Error stopping backend in uncaughtException: ${stopError.message}`, 'ERROR')
+    }
+  }
+  
   dialog.showErrorBox(
     '未捕获的异常',
     `应用发生未捕获的异常：\n\n${error.message}\n\n日志文件: ${logFile}`
   )
+  
+  app.exit(1)
 })
 
 process.on('unhandledRejection', (reason, promise) => {
@@ -275,4 +342,39 @@ process.on('unhandledRejection', (reason, promise) => {
   if (reason instanceof Error) {
     log(`Stack: ${reason.stack}`, 'ERROR')
   }
+})
+
+// 处理进程退出信号（SIGINT, SIGTERM）
+process.on('SIGINT', async () => {
+  if (isQuitting) {
+    return
+  }
+  isQuitting = true
+  
+  log('Received SIGINT, cleaning up...')
+  if (backendManager) {
+    try {
+      await backendManager.stop()
+    } catch (error) {
+      log(`Error stopping backend on SIGINT: ${error.message}`, 'ERROR')
+    }
+  }
+  app.exit(0)
+})
+
+process.on('SIGTERM', async () => {
+  if (isQuitting) {
+    return
+  }
+  isQuitting = true
+  
+  log('Received SIGTERM, cleaning up...')
+  if (backendManager) {
+    try {
+      await backendManager.stop()
+    } catch (error) {
+      log(`Error stopping backend on SIGTERM: ${error.message}`, 'ERROR')
+    }
+  }
+  app.exit(0)
 })
