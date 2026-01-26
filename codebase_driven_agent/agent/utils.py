@@ -45,6 +45,8 @@ def create_llm():
             max_tokens=settings.llm_max_tokens,
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
+            timeout=60.0,  # 设置超时时间为 60 秒
+            max_retries=3,  # 设置最大重试次数为 3 次
         )
         # 打印实际使用的配置和完整的 API URL
         logger.info(f"  Actual Base URL (from client): {llm.openai_api_base if hasattr(llm, 'openai_api_base') else settings.llm_base_url}")
@@ -73,6 +75,8 @@ def create_llm():
             max_tokens=settings.llm_max_tokens,
             api_key=settings.openai_api_key,
             base_url=base_url,  # 如果设置了自定义 Base URL，使用它
+            timeout=60.0,  # 设置超时时间为 60 秒
+            max_retries=3,  # 设置最大重试次数为 3 次
         )
         # 打印实际使用的配置
         logger.info(f"  Actual Base URL (from client): {llm.openai_api_base if hasattr(llm, 'openai_api_base') else base_url}")

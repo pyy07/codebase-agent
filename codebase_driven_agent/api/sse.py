@@ -148,9 +148,13 @@ async def _run_graph_executor_stream(
             if event and isinstance(event, dict):
                 # 使用线程安全的 put_nowait
                 message_queue.put_nowait(event)
+        # 正常完成，发送 done 事件
+        message_queue.put_nowait({"event": "done", "data": {"message": "Analysis completed"}})
     except Exception as e:
         logger.error(f"Error in _run_graph_executor_stream: {e}", exc_info=True)
         message_queue.put_nowait({"event": "error", "data": {"error": str(e)}})
+        # 错误情况下也发送 done 事件，通知前端任务已完成
+        message_queue.put_nowait({"event": "done", "data": {"message": "Analysis failed", "error": str(e)}})
 
 
 async def _execute_analysis_stream(
