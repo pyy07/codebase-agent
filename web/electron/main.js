@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const BackendManager = require('./backend')
@@ -59,6 +59,45 @@ console.warn = (...args) => {
 
 log(`Application starting... (isDev: ${isDev}, isPackaged: ${app.isPackaged})`)
 log(`Log file: ${logFile}`)
+
+/**
+ * 读取 .env 文件中的 API_KEY（如果存在）
+ */
+function getApiKeyFromEnv() {
+  try {
+    let envPath
+    if (app.isPackaged) {
+      // 打包后的应用：从 resources 目录读取
+      envPath = path.join(process.resourcesPath, '.env')
+    } else {
+      // 开发模式：从项目根目录读取
+      envPath = path.join(__dirname, '../../.env')
+    }
+    
+    if (fs.existsSync(envPath)) {
+      const envContent = fs.readFileSync(envPath, 'utf-8')
+      const lines = envContent.split('\n')
+      for (const line of lines) {
+        const trimmedLine = line.trim()
+        // 跳过注释和空行
+        if (trimmedLine && !trimmedLine.startsWith('#')) {
+          const match = trimmedLine.match(/^API_KEY\s*=\s*(.+)$/i)
+          if (match) {
+            return match[1].trim()
+          }
+        }
+      }
+    }
+  } catch (error) {
+    log(`Error reading API_KEY from .env: ${error.message}`, 'ERROR')
+  }
+  return null
+}
+
+// 注册 IPC 处理器：获取 API key
+ipcMain.handle('get-api-key', () => {
+  return getApiKeyFromEnv()
+})
 
 /**
  * 创建应用窗口

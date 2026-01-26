@@ -559,7 +559,22 @@ function App() {
     })
     
     // 在后台发送请求，不阻塞 UI
-    const apiKey = localStorage.getItem('apiKey')
+    // 优先使用 Electron 暴露的 API key（从 .env 文件读取），如果没有则使用 localStorage
+    const electronAPI = (window as any).electronAPI
+    let apiKey = localStorage.getItem('apiKey')
+    
+    // 如果 Electron API 可用，尝试获取 API key（异步等待）
+    if (electronAPI?.getApiKey) {
+      try {
+        const envApiKey = await electronAPI.getApiKey()
+        if (envApiKey) {
+          apiKey = envApiKey
+        }
+      } catch (error) {
+        console.warn('[App] Failed to get API key from Electron:', error)
+      }
+    }
+    
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     }

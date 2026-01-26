@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Send, Upload, X, FileCode, FileText, Settings2, Zap } from 'lucide-react'
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -20,6 +20,21 @@ const AnalysisForm: React.FC<AnalysisFormProps> = ({ onSubmit, loading }) => {
   const [showSettings, setShowSettings] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  
+  // 如果 Electron 提供了 API key，自动同步到 localStorage（用于显示）
+  useEffect(() => {
+    const electronAPI = (window as any).electronAPI
+    if (electronAPI?.getApiKey) {
+      electronAPI.getApiKey().then((envApiKey: string | null) => {
+        if (envApiKey && !localStorage.getItem('apiKey')) {
+          localStorage.setItem('apiKey', envApiKey)
+          setApiKey(envApiKey)
+        }
+      }).catch((error: any) => {
+        console.warn('[AnalysisForm] Failed to get API key from Electron:', error)
+      })
+    }
+  }, [])
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
