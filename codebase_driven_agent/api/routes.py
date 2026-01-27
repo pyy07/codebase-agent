@@ -404,6 +404,40 @@ async def reply_to_agent(reply_request: UserReplyRequest):
         executor = session.executor
         message_queue = session.message_queue
         
+        # 标记"请求用户输入"步骤为已完成，并更新 current_step
+        plan_steps = updated_state.get("plan_steps", [])
+        current_step = updated_state.get("current_step", 0)
+        
+        # 找到用户交互步骤（通常是当前步骤）
+        user_input_step_idx = None
+        for step_idx, step in enumerate(plan_steps):
+            if step.get("tool_name") == "user_input" or step.get("action", "").lower().find("请求用户输入") >= 0:
+                user_input_step_idx = step_idx
+                break
+        
+        # 发送步骤执行结果，标记用户输入步骤为已完成
+        if message_queue and user_input_step_idx is not None:
+            try:
+                step_execution_msg = {
+                    "event": "step_execution",
+                    "data": {
+                        "step": user_input_step_idx + 1,
+                        "action": plan_steps[user_input_step_idx].get("action"),
+                        "target": plan_steps[user_input_step_idx].get("target"),
+                        "status": "completed",
+                        "result": f"用户已回复：{reply_request.reply[:200]}",
+                    }
+                }
+                message_queue.put_nowait(step_execution_msg)
+                logger.info(f"User reply: Marked user input step {user_input_step_idx + 1} as completed")
+            except Exception as e:
+                logger.error(f"Failed to mark user input step as completed: {e}", exc_info=True)
+        
+        # 更新 current_step：用户交互步骤已完成，移动到下一个步骤
+        if user_input_step_idx is not None:
+            updated_state["current_step"] = user_input_step_idx + 1
+            logger.info(f"User reply: Updated current_step from {current_step} to {user_input_step_idx + 1}")
+        
         # 确保 executor 的 message_queue 正确设置（用户回复后的执行需要使用同一个队列）
         # GraphExecutorWrapper 内部使用 self.executor (GraphExecutor)，需要设置 executor.executor.message_queue
         graph_executor = None
@@ -459,8 +493,27 @@ async def reply_to_agent(reply_request: UserReplyRequest):
                 while iteration < max_iterations:
                     iteration += 1
                     
-                    # 执行决策节点（基于用户回复重新决策）
-                    # 使用 graph_executor 而不是 executor
+                    # 检查是否还有未执行的步骤
+                    plan_steps = updated_state.get("plan_steps", [])
+                    current_step = updated_state.get("current_step", 0)
+                    
+                    # 如果还有未执行的步骤，先执行下一个步骤
+                    if current_step < len(plan_steps):
+                        logger.info(f"User reply: Executing next step {current_step + 1}/{len(plan_steps)}")
+                        # 执行下一个步骤
+                        import asyncio
+                        step_result = await asyncio.to_thread(
+                            graph_executor._execute_step_node,
+                            updated_state
+                        )
+                        updated_state.update(step_result)
+                        session.state = updated_state
+                        
+                        # 执行步骤后，继续循环进行决策
+                        continue
+                    
+                    # 如果没有更多步骤，执行决策节点（基于用户回复和已有结果重新决策）
+                    logger.info("User reply: No more steps, executing decision node")
                     decision_result = graph_executor._decision_node(updated_state)
                     updated_state.update(decision_result)
                     session.state = updated_state
@@ -485,6 +538,11 @@ async def reply_to_agent(reply_request: UserReplyRequest):
                         break
                     elif next_action == "request_input":
                         # 再次请求用户输入，保存会话
+                        logger.info("User reply: Action is 'request_input', executing request_user_input node")
+                        # 确保 graph_executor 的 message_queue 正确设置
+                        if not graph_executor.message_queue:
+                            graph_executor.message_queue = message_queue
+                            logger.info(f"User reply: Set graph_executor.message_queue for request_input")
                         request_result = graph_executor._request_user_input_node(updated_state)
                         updated_state.update(request_result)
                         session.state = updated_state
@@ -498,6 +556,23 @@ async def reply_to_agent(reply_request: UserReplyRequest):
                                 message_queue=message_queue,
                                 request_id=new_request_id
                             )
+                        # _request_user_input_node 会自动发送 user_input_request 事件到消息队列
+                        logger.info(f"User reply: Request user input node completed, request_id={new_request_id}, message_queue size={message_queue.qsize() if message_queue else 'N/A'}")
+                        # 确保消息队列中有事件（如果 _request_user_input_node 没有发送，这里手动发送）
+                        if message_queue and message_queue.qsize() == 0:
+                            logger.warning(f"User reply: message_queue is empty after request_user_input_node, manually sending event")
+                            try:
+                                message_queue.put_nowait({
+                                    "event": "user_input_request",
+                                    "data": {
+                                        "request_id": new_request_id,
+                                        "question": updated_state.get("user_input_question", ""),
+                                        "context": updated_state.get("user_input_context", ""),
+                                    }
+                                })
+                                logger.info(f"User reply: Manually sent user_input_request event")
+                            except Exception as e:
+                                logger.error(f"Failed to manually queue user_input_request message: {e}", exc_info=True)
                         break
                     elif next_action == "continue":
                         # "continue" 表示应该执行 execute_step 节点

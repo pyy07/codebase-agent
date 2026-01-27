@@ -26,9 +26,27 @@ class ReadTool(BaseCodebaseTool):
     
     name: str = "read"
     description: str = (
-        "读取文件内容。可以读取代码仓库中的任何文件，支持指定行号范围。"
-        "使用场景：需要查看特定文件的代码内容、配置文件、文档等。"
-        "参数：file_path（文件路径，相对于代码仓库根目录）、offset（起始行号，可选）、limit（读取行数，可选）。"
+        "读取文件内容。读取代码仓库中的任何文件，支持指定行号范围。"
+        ""
+        "功能："
+        "- 读取完整文件内容"
+        "- 读取指定行号范围的内容"
+        "- 支持多种文件格式（代码文件、配置文件、文档等）"
+        ""
+        "使用场景："
+        "- 查看特定文件的代码内容"
+        "- 查看文件的特定行范围"
+        "- 查看配置文件、文档等"
+        ""
+        "参数："
+        "- file_path（必需）：文件路径，相对于代码仓库根目录，例如 'src/utils.py'"
+        "- offset（可选）：起始行号，从1开始，包含该行。例如 offset=100 表示从第100行开始"
+        "- limit（可选）：读取的行数。例如 limit=51 表示读取51行（100-150行）"
+        ""
+        "使用示例："
+        "- 读取完整文件：read(file_path='src/main.py')"
+        "- 读取第 100-150 行：read(file_path='src/utils.py', offset=100, limit=51)"
+        "- 读取从第 50 行开始的内容：read(file_path='config.json', offset=50)"
     )
     
     def __init__(self, **kwargs):
@@ -47,6 +65,14 @@ class ReadTool(BaseCodebaseTool):
         Returns:
             ToolResult
         """
+        logger.info("=" * 80)
+        logger.info("ReadTool execution started")
+        logger.info(f"  file_path: {file_path}")
+        logger.info(f"  offset: {offset}")
+        logger.info(f"  limit: {limit}")
+        logger.info(f"  code_repo_path: {self.code_repo_path}")
+        logger.info("=" * 80)
+        
         try:
             # 验证代码仓库路径
             if not self.code_repo_path:
@@ -70,10 +96,17 @@ class ReadTool(BaseCodebaseTool):
             # 构建完整路径（file_path 必须是相对路径）
             full_path = (repo_path / normalized_file_path).resolve()
             
+            logger.info(f"  normalized_file_path: {normalized_file_path}")
+            logger.info(f"  repo_path: {repo_path}")
+            logger.info(f"  full_path: {full_path}")
+            logger.info(f"  full_path.exists(): {full_path.exists()}")
+            
             # 确保文件在代码仓库内（防止路径遍历攻击）
             try:
-                full_path.relative_to(repo_path)
+                relative_path = full_path.relative_to(repo_path)
+                logger.info(f"  relative_path: {relative_path}")
             except ValueError:
+                logger.error(f"Path traversal detected: {file_path} -> {full_path}")
                 return ToolResult(
                     success=False,
                     error=f"文件路径超出代码仓库范围: {file_path} (解析后: {full_path})"
@@ -81,9 +114,22 @@ class ReadTool(BaseCodebaseTool):
             
             # 检查文件是否存在
             if not full_path.exists():
+                logger.warning(f"File not found: {full_path}")
+                # 尝试查找相似的文件
+                possible_files = []
+                if repo_path.exists():
+                    for p in repo_path.rglob(normalized_file_path.split('/')[-1] if '/' in normalized_file_path else normalized_file_path):
+                        if p.is_file():
+                            possible_files.append(str(p.relative_to(repo_path)))
+                            if len(possible_files) >= 5:
+                                break
+                
+                error_msg = f"文件不存在: {file_path}"
+                if possible_files:
+                    error_msg += f"\n\n可能的文件路径：\n" + "\n".join(f"  - {f}" for f in possible_files[:5])
                 return ToolResult(
                     success=False,
-                    error=f"文件不存在: {file_path}"
+                    error=error_msg
                 )
             
             # 检查是否为文件
@@ -152,6 +198,10 @@ class ReadTool(BaseCodebaseTool):
             # 提取指定范围的行
             selected_lines = lines[start_idx:end_idx]
             
+            logger.info(f"  total_lines: {total_lines}")
+            logger.info(f"  start_idx: {start_idx}, end_idx: {end_idx}")
+            logger.info(f"  selected_lines count: {len(selected_lines)}")
+            
             # 构建输出
             result_lines = []
             result_lines.append(f"文件: {file_path}")
@@ -167,6 +217,9 @@ class ReadTool(BaseCodebaseTool):
                 result_lines.append(f"{i:4d} | {line.rstrip()}")
             
             result_text = "\n".join(result_lines)
+            
+            logger.info(f"  result_text length: {len(result_text)} characters")
+            logger.info(f"  result_text preview (first 200 chars): {result_text[:200]}")
             
             # 检查是否需要截断
             truncated = False

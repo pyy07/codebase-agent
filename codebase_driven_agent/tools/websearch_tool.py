@@ -37,10 +37,22 @@ class WebSearchTool(BaseCodebaseTool):
     
     name: str = "websearch"
     description: str = (
-        "在网络上搜索信息。可以搜索文档、错误解决方案、API 使用示例等。"
-        "注意：需要配置搜索 API Key（EXA_API_KEY 或 SERPER_API_KEY）。"
-        "使用场景：查找错误解决方案、API 文档、最佳实践等。"
-        "参数：query（搜索查询）、max_results（最大结果数量，可选，默认5）。"
+        "在网络上搜索信息。搜索文档、错误解决方案、API 使用示例等。"
+        ""
+        "功能："
+        "- 网络搜索功能"
+        "- 返回相关网页链接和摘要"
+        "- 支持限制搜索结果数量"
+        ""
+        "使用场景："
+        "- 查找错误解决方案"
+        "- 搜索 API 文档和使用示例"
+        "- 查找最佳实践和技术资料"
+        "- 获取最新的技术信息"
+        ""
+        "参数："
+        "- query（必需）：搜索查询关键词"
+        "- max_results（可选）：最大结果数量，默认 5"
     )
     
     def __init__(self, **kwargs):

@@ -16,14 +16,18 @@ import {
   Gauge,
   Lightbulb,
   FileCode,
-  Clock
+  Clock,
+  MessageSquare,
+  Send
 } from 'lucide-react'
 import { ChatMessage, MessageContent, PlanStep, AnalysisResult, UserInputRequestData, UserReplyData } from '../types'
 import { Badge } from '@/components/ui/badge'
+import { Dialog, DialogContent, DialogClose } from '@/components/ui/dialog'
 import UnifiedStepsBlock from './UnifiedStepsBlock'
 import UserInputRequest from './UserInputRequest'
 import UserReply from './UserReply'
 import './AgentMessage.css'
+import './UserInputModal.css'
 
 interface AgentMessageProps {
   message: ChatMessage
@@ -112,17 +116,18 @@ function ContentBlock({ content, isStreaming, allContents, onSubmitUserReply }: 
       return <TextBlock text={content.data} />
     case 'user_input_request': {
       // 用户输入请求现在由 UnifiedStepsBlock 处理，这里不单独显示
-      // 但如果 UnifiedStepsBlock 不存在，则显示原始组件作为后备
+      // 但如果 UnifiedStepsBlock 不存在，则显示对话框作为后备
       const hasPlan = allContents?.some(c => c.type === 'plan')
       if (hasPlan) {
         return null // UnifiedStepsBlock 会处理显示
       }
-      // 如果没有 plan，显示原始组件
+      // 如果没有 plan，显示对话框（使用 UnifiedStepsBlock 中的 UserInputModal）
       if (!onSubmitUserReply) {
         console.warn('onSubmitUserReply not provided, cannot handle user input request')
         return null
       }
-      return <UserInputRequest request={content.data} onSubmit={onSubmitUserReply} />
+      // 使用 UnifiedStepsBlock 中的 UserInputModal 组件显示对话框
+      return <UserInputModalWithoutPlan request={content.data} onSubmit={onSubmitUserReply} />
     }
     case 'user_reply': {
       // 用户回复现在由 UnifiedStepsBlock 处理，这里不单独显示
@@ -737,6 +742,130 @@ function TextBlock({ text }: { text: string }) {
         <ReactMarkdown>{text}</ReactMarkdown>
       </div>
     </div>
+  )
+}
+
+// User Input Modal Component (for cases without plan)
+interface UserInputModalWithoutPlanProps {
+  request: UserInputRequestData
+  onSubmit: (requestId: string, reply: string) => Promise<void>
+}
+
+function UserInputModalWithoutPlan({ request, onSubmit }: UserInputModalWithoutPlanProps) {
+  const [reply, setReply] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!reply.trim() || isSubmitting) return
+    
+    const replyText = reply.trim()
+    setIsSubmitting(true)
+    
+    // 立即关闭对话框，不等待后端响应
+    // 用户回复会立即显示在主界面，后续分析通过 SSE 流式更新
+    onSubmit(request.request_id, replyText).catch((error) => {
+      console.error('Error submitting reply:', error)
+      // 错误会通过 handleError 显示，不影响对话框关闭
+    })
+    
+    // 对话框会在 onSubmit 调用后立即关闭（因为 onSubmit 立即返回）
+  }
+  
+  const handleClose = async () => {
+    if (isSubmitting) return
+    setIsSubmitting(true)
+    
+    // 立即关闭对话框，不等待后端响应
+    // 跳过操作会在后台执行，后续分析通过 SSE 流式更新
+    onSubmit(request.request_id, '__SKIP__').catch((error) => {
+      console.error('Error closing/skipping input:', error)
+      // 错误会通过 handleError 显示，不影响对话框关闭
+    })
+    
+    // 对话框会在 onSkip 调用后立即关闭（因为 onSkip 立即返回）
+  }
+  
+  return (
+    <Dialog open={true} onOpenChange={(open) => {
+      if (!open && !isSubmitting) {
+        handleClose()
+      }
+    }}>
+      <DialogContent>
+        <DialogClose onClose={handleClose} />
+        <div className="user-input-modal-content">
+          <div className="user-input-modal-header">
+            <div className="user-input-modal-title">
+              <MessageSquare size={20} className="user-input-modal-title-icon" />
+              <span>Agent 需要您的帮助</span>
+            </div>
+            <div className="user-input-modal-description">
+              请提供以下信息以继续分析
+            </div>
+          </div>
+          
+          <div className="user-input-modal-section">
+            <label className="user-input-modal-section-label">问题</label>
+            <div className="user-input-modal-section-content">
+              {request.question}
+            </div>
+          </div>
+          
+          {request.context && (
+            <div className="user-input-modal-section">
+              <label className="user-input-modal-section-label">上下文</label>
+              <div className="user-input-modal-section-content">
+                {request.context}
+              </div>
+            </div>
+          )}
+          
+          <form onSubmit={handleSubmit} className="user-input-modal-form">
+            <label htmlFor="reply-input" className="user-input-modal-label">
+              您的回复
+            </label>
+            <textarea
+              id="reply-input"
+              value={reply}
+              onChange={(e) => setReply(e.target.value)}
+              placeholder="请输入您的回复..."
+              className="user-input-modal-textarea"
+              disabled={isSubmitting}
+              rows={5}
+            />
+            
+            <div className="user-input-modal-footer">
+              <button
+                type="button"
+                onClick={handleClose}
+                disabled={isSubmitting}
+                className="user-input-modal-button user-input-modal-button-secondary"
+              >
+                关闭（不提供信息）
+              </button>
+              <button
+                type="submit"
+                disabled={!reply.trim() || isSubmitting}
+                className="user-input-modal-button user-input-modal-button-primary"
+              >
+                {isSubmitting ? (
+                  <>
+                    <Loader2 size={16} className="user-input-modal-button-icon user-input-modal-spinner" />
+                    提交中...
+                  </>
+                ) : (
+                  <>
+                    <Send size={16} className="user-input-modal-button-icon" />
+                    提交回复
+                  </>
+                )}
+              </button>
+            </div>
+          </form>
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 

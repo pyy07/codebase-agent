@@ -42,94 +42,109 @@ export default function UnifiedStepsBlock({
   
   // 自动打开未回复的用户输入请求的对话框
   useEffect(() => {
-    // 查找未回复的用户输入请求
-    const unrepliedRequest = userInputRequests.find(req => {
+    // 查找未回复的用户输入请求（按时间戳排序，优先显示最新的）
+    // 过滤掉 request_id 为空的请求（这些可能是无效的请求）
+    const unrepliedRequests = userInputRequests.filter(req => {
+      // 跳过 request_id 为空的请求
+      if (!req.request_id || req.request_id.trim() === '') {
+        console.log('[UnifiedStepsBlock] Skipping request with empty request_id:', req)
+        return false
+      }
       const hasReply = userReplies.some(reply => reply.request_id === req.request_id)
       return !hasReply
     })
     
-    // 如果有未回复的请求且对话框未打开，自动打开
-    if (unrepliedRequest && openModalRequestId !== unrepliedRequest.request_id) {
-      setOpenModalRequestId(unrepliedRequest.request_id)
+    // 按时间戳排序，最新的在前
+    unrepliedRequests.sort((a, b) => {
+      const timeA = a.timestamp?.getTime() || 0
+      const timeB = b.timestamp?.getTime() || 0
+      return timeB - timeA
+    })
+    
+    console.log('[UnifiedStepsBlock] Checking modal state:', {
+      totalRequests: userInputRequests.length,
+      validUnrepliedRequests: unrepliedRequests.length,
+      currentOpenModalId: openModalRequestId,
+      allRequestIds: userInputRequests.map(r => ({ id: r.request_id, hasReply: userReplies.some(reply => reply.request_id === r.request_id) })),
+    })
+    
+    // 如果有未回复的请求且对话框未打开，自动打开最新的
+    if (unrepliedRequests.length > 0) {
+      const latestRequest = unrepliedRequests[0]
+      // 确保 request_id 不为空
+      if (latestRequest.request_id && latestRequest.request_id.trim() !== '') {
+        if (openModalRequestId !== latestRequest.request_id) {
+          console.log('[UnifiedStepsBlock] Opening modal for request:', latestRequest.request_id, 'Total unreplied:', unrepliedRequests.length)
+          setOpenModalRequestId(latestRequest.request_id)
+        } else {
+          console.log('[UnifiedStepsBlock] Modal already open for request:', latestRequest.request_id)
+        }
+      } else {
+        console.warn('[UnifiedStepsBlock] Latest request has empty request_id, cannot open modal:', latestRequest)
+      }
+    } else if (openModalRequestId !== null && openModalRequestId !== '') {
+      // 如果没有未回复的请求，但对话框还打开着，关闭它
+      console.log('[UnifiedStepsBlock] Closing modal, no unreplied requests')
+      setOpenModalRequestId(null)
     }
   }, [userInputRequests, userReplies, openModalRequestId])
   
-  // 合并计划和执行步骤，并将用户交互作为独立步骤插入
-  // 构建包含用户交互步骤的完整步骤列表
+  // 合并计划和执行步骤
+  // 用户交互步骤已经在 plan_steps 中（tool_name 为 "user_input"）
+  // 只需要按照 plan_steps 的顺序显示，不需要复杂的插入逻辑
   const unifiedSteps: UnifiedStep[] = []
-  const insertedRequestIds = new Set<string>() // 跟踪已插入的请求ID
   
-  // 首先处理所有计划步骤
-  planSteps.forEach((planStep, index) => {
+  // 按照 plan_steps 的顺序处理每个步骤
+  planSteps.forEach((planStep) => {
     const executionStep = executionSteps.find(es => es.step === planStep.step)
     
-    const mergedStep: UnifiedStep = {
-      ...planStep,
-      // 优先使用执行步骤的状态和结果
-      status: executionStep?.status || planStep.status,
-      result: executionStep?.result,
-      result_truncated: executionStep?.result_truncated,
-      error: executionStep?.error,
-      timestamp: executionStep?.timestamp,
-    }
+    // 检查是否是用户交互步骤
+    const isUserInputStep = planStep.tool_name === "user_input"
     
-    unifiedSteps.push(mergedStep)
-    
-    // 在当前步骤完成后，检查是否有用户输入请求
-    // 用户输入请求应该插入在当前步骤之后，下一个步骤之前
-    if (executionStep?.status === 'completed') {
-      // 查找应该插入在当前步骤之后的用户输入请求
-      // 简单策略：如果这是最后一个已完成的步骤，或者请求时间戳在当前步骤之后
-      const currentStepTimestamp = executionStep.timestamp
-      const isLastCompletedStep = !planSteps.slice(index + 1).some(ps => {
-        const es = executionSteps.find(e => e.step === ps.step)
-        return es?.status === 'completed'
-      })
+    if (isUserInputStep) {
+      // 用户交互步骤：查找对应的用户输入请求和回复
+      const toolParams = planStep.tool_params || {}
+      const question = toolParams.question || ""
+      const context = toolParams.context || ""
       
-      // 查找未插入的用户输入请求
-      const pendingRequest = userInputRequests.find(request => {
-        if (insertedRequestIds.has(request.request_id)) {
-          return false // 已经插入过
-        }
-        
-        // 如果这是最后一个已完成的步骤，或者请求时间戳在当前步骤之后，则插入
-        if (isLastCompletedStep) {
-          return true
-        }
-        
-        const requestTimestamp = request.timestamp
-        return requestTimestamp && currentStepTimestamp && requestTimestamp >= currentStepTimestamp
-      })
+      // 查找对应的用户输入请求（通过 question 匹配）
+      const matchingRequest = userInputRequests.find(req => 
+        req.question === question || req.context === context
+      )
       
-      if (pendingRequest) {
-        insertedRequestIds.add(pendingRequest.request_id)
-        
-        // 查找对应的用户回复
-        const reply = userReplies.find(r => r.request_id === pendingRequest.request_id)
-        
-        // 插入用户输入请求步骤（包含用户回复，如果有的话）
-        const userInputStep: UnifiedStep = {
-          step: planStep.step + 0.5, // 使用小数步骤号，表示这是插入的步骤
-          action: reply ? '用户交互' : '请求用户输入',
-          target: reply ? reply.reply : pendingRequest.question,
-          status: reply ? 'completed' : 'running',
-          userInputRequest: pendingRequest,
-          userReply: reply,
-          timestamp: pendingRequest.timestamp,
-        }
-        
-        unifiedSteps.push(userInputStep)
+      // 查找对应的用户回复
+      const matchingReply = matchingRequest 
+        ? userReplies.find(reply => reply.request_id === matchingRequest.request_id)
+        : null
+      
+      const userInputStep: UnifiedStep = {
+        ...planStep,
+        status: matchingReply ? "completed" : (executionStep?.status || "running"),
+        userInputRequest: matchingRequest,
+        userReply: matchingReply,
+        result: matchingReply ? `用户已回复：${matchingReply.reply}` : undefined,
+        timestamp: matchingRequest?.timestamp || executionStep?.timestamp,
       }
+      
+      unifiedSteps.push(userInputStep)
+    } else {
+      // 普通步骤：合并计划步骤和执行步骤
+      const mergedStep: UnifiedStep = {
+        ...planStep,
+        // 优先使用执行步骤的状态和结果
+        status: executionStep?.status || planStep.status,
+        result: executionStep?.result,
+        result_truncated: executionStep?.result_truncated,
+        error: executionStep?.error,
+        timestamp: executionStep?.timestamp,
+      }
+      
+      unifiedSteps.push(mergedStep)
     }
   })
   
-  // 按步骤号排序
+  // 按步骤号排序（保持 plan_steps 的顺序）
   unifiedSteps.sort((a, b) => a.step - b.step)
-  
-  // 重新编号步骤，使其连续
-  unifiedSteps.forEach((step, index) => {
-    step.step = index + 1
-  })
   
   // 调试日志：检查步骤结果
   unifiedSteps.forEach((step) => {

@@ -31,24 +31,28 @@ class LogTool(BaseCodebaseTool):
     功能：
     - 根据关键词搜索日志
     - 按时间范围查询日志
-    - 支持 SPL（Search Processing Language）查询（日志易）
+    - 支持高级查询语法
     - 支持文件日志查询
     - 分页查询支持
+    
+    使用场景：
+    - 查找错误日志、异常信息
+    - 按时间范围查询日志
+    - 分析系统运行状态
+    - 追踪问题发生的时间线
+    
+    参数：
+    - query（必需）：搜索查询，可以是关键词或高级查询语法
+    - appname（可选）：项目名称，如果未提供且未配置默认值，需要询问用户
+    - start_time（可选）：开始时间，ISO 格式，如 "2024-01-01T10:00:00"
+    - end_time（可选）：结束时间，ISO 格式
+    - limit（可选）：限制返回记录数，默认 100
     
     使用示例：
     - query: "error" - 搜索包含 error 的日志
     - query: "appname:myapp error" - 在指定项目中搜索错误日志
     - query: "level=ERROR" - 查询错误级别日志
-    - appname: "my-project" - 指定项目名称（必需，如果未配置 LOGYI_APPNAME）
-    - start_time: "2024-01-01T10:00:00" - 指定开始时间
-    - limit: 100 - 限制返回记录数
-    
-    重要提示：
-    - appname 参数是必需的。如果用户没有提供，请询问用户要查询哪个项目/应用的日志
-    - 如果配置了 LOGYI_APPNAME，可以不提供 appname 参数
-    - 所有查询都会自动包含 appname 过滤
-    - SPL 查询会自动验证语法安全性
-    - 结果会自动截断，避免返回过多数据
+    - appname: "my-project", start_time: "2024-01-01T10:00:00" - 指定项目和时间范围
     """
     args_schema: type[LogToolInput] = LogToolInput
     

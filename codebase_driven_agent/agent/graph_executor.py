@@ -71,8 +71,16 @@ class GraphExecutor:
         # 设置入口点
         graph.set_entry_point("plan")
 
-        # 添加边
-        graph.add_edge("plan", "execute_step")
+        # 添加条件边：plan 节点可以根据情况跳转到 execute_step 或 request_user_input
+        graph.add_conditional_edges(
+            "plan",
+            self._should_execute_plan,
+            {
+                "execute_step": "execute_step",
+                "request_input": "request_user_input",
+            },
+        )
+        
         graph.add_edge("execute_step", "decide")
 
         # 条件边
@@ -130,6 +138,39 @@ class GraphExecutor:
         response = self.llm.invoke(messages)
         messages.append(AIMessage(content=response.content))
 
+        # 首次生成计划时，检查是否需要用户输入
+        if not state["plan_steps"] or current_step == 0:
+            # 尝试解析决策（可能包含 request_input action）
+            decision_result = self._parse_decision(response.content)
+            action = decision_result.get("action", "continue")
+            
+            if action == "request_input":
+                # LLM 决定请求用户输入，将其作为第一个步骤添加到 plan_steps
+                question = decision_result.get("question", "请提供更多信息以继续分析。")
+                context = decision_result.get("context", "")
+                logger.info(f"Plan node: LLM decided to request user input before generating plan. Question: {question[:200]}")
+                
+                # 将用户交互作为第一个步骤添加到 plan_steps
+                user_input_step = {
+                    "step": 1,
+                    "action": "请求用户输入",
+                    "tool_name": "user_input",  # 特殊工具名称，表示用户交互
+                    "tool_params": {
+                        "question": question,
+                        "context": context,
+                    }
+                }
+                
+                return {
+                    "should_continue": True,
+                    "decision": "request_input",
+                    "user_input_question": question,
+                    "user_input_context": context,
+                    "messages": messages,
+                    "plan_steps": [user_input_step],  # 将用户交互作为第一个步骤
+                    "current_step": 0,
+                }
+        
         # 解析生成的计划
         new_plan = self._parse_plan(response.content)
 
@@ -142,8 +183,27 @@ class GraphExecutor:
 
         logger.info(f"Plan node: Generated {len(plan_steps)} steps")
 
+        # 检查计划是否为空（首次生成计划时）
+        if not state["plan_steps"] and not plan_steps:
+            logger.error(
+                "Plan node: Failed to generate initial plan. LLM response may be missing tool_name or tool_params. "
+                f"Response: {response.content[:500]}"
+            )
+            # 如果首次生成计划失败，请求用户输入，让用户知道问题
+            return {
+                "should_continue": True,
+                "decision": "request_input",
+                "user_input_question": (
+                    "无法生成分析计划。请提供更详细的信息以继续分析。"
+                ),
+                "user_input_context": f"原始输入: {state['original_input'][:200]}",
+                "messages": messages,
+                "plan_steps": [],  # 保持空计划
+                "current_step": 0,
+            }
+
         # 立即通过消息队列发送 plan 消息（使用线程安全的 queue.Queue）
-        if self.message_queue:
+        if self.message_queue and plan_steps:
             try:
                 # queue.Queue 是线程安全的，可以直接从任何线程 put
                 self.message_queue.put_nowait({"event": "plan", "data": {"steps": plan_steps}})
@@ -176,9 +236,33 @@ class GraphExecutor:
             f"Execute step node: Step {current_step + 1}/{len(plan_steps)} - {step.get('action')}"
         )
 
-        # 根据步骤的 action 决定使用哪个工具
-        tool_name = self._map_action_to_tool(step.get("action", ""))
-        tool_input = self._build_tool_input(step, state)
+        # 使用大模型直接提供的工具名称和参数（必须由 LLM 提供，不再支持代码推断）
+        if "tool_name" not in step or "tool_params" not in step:
+            error_msg = (
+                f"计划步骤缺少 tool_name 或 tool_params 字段。步骤内容: {step}。\n"
+                f"请确保计划中的每个步骤都包含 tool_name 和 tool_params 字段。\n"
+                f"示例格式：\n"
+                f'{{"step": 1, "action": "...", "tool_name": "read", "tool_params": {{"file_path": "..."}}}}'
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        tool_name = step["tool_name"]
+        tool_input = step["tool_params"]
+        logger.info(f"Using tool_name and tool_params from plan: {tool_name}, params: {tool_input}")
+
+        # 检查是否是用户交互步骤
+        if tool_name == "user_input":
+            # 用户交互步骤：跳转到 request_user_input 节点
+            logger.info(f"Execute step node: Step {current_step + 1} is user input step, skipping tool execution")
+            # 返回状态，让图执行跳转到 request_user_input 节点
+            return {
+                "step_results": state["step_results"],
+                "current_step": current_step,  # 不增加 current_step，因为用户交互步骤还未完成
+                "decision": "request_input",
+                "user_input_question": tool_input.get("question", ""),
+                "user_input_context": tool_input.get("context", ""),
+            }
 
         # 执行工具调用
         try:
@@ -332,9 +416,47 @@ class GraphExecutor:
             logger.info(f"Decision node: Parsed decision - action={action}, has_question={bool(question)}, question={question[:100] if question else 'N/A'}")
             logger.debug(f"Decision node: Full parsed decision: {decision}")
             
+            # 检查：如果 action 是 synthesize，但 reasoning 中明确提到需要用户输入，则改为 request_input
+            if action == "synthesize" and reasoning:
+                reasoning_lower = reasoning.lower()
+                # 通用的关键词检测：检查 reasoning 中是否提到需要更多信息
+                if ('信息不足' in reasoning or '缺少信息' in reasoning or '未提供' in reasoning or 
+                    '无法' in reasoning or '需要' in reasoning or '请求' in reasoning):
+                    logger.warning(
+                        f"Decision node: LLM returned 'synthesize' but reasoning indicates need for user input. "
+                        f"Converting to 'request_input'. Reasoning: {reasoning[:200]}"
+                    )
+                    action = "request_input"
+                    # 从 reasoning 中提取问题，如果没有提供 question
+                    if not question:
+                        # 尝试提取问题描述
+                        import re
+                        question_match = re.search(r'(?:需要|请提供|缺少|未提供)(.+?)(?:[。\n]|$)', reasoning)
+                        if question_match:
+                            question = f"请提供以下信息：{question_match.group(1).strip()}"
+                        else:
+                            question = "请提供更多信息以继续分析。"
+                    if not context:
+                        context = reasoning[:500]
+            
             if action == "request_input":
-                # LLM 决定请求用户输入
+                # LLM 决定请求用户输入，将其作为下一个步骤添加到 plan_steps
                 logger.info(f"Decision node: Requesting user input. Question: {question[:200]}")
+                
+                # 获取当前步骤号和计划步骤
+                current_step = state.get("current_step", 0)
+                plan_steps = state.get("plan_steps", [])
+                
+                # 将用户交互作为下一个步骤添加到 plan_steps
+                user_input_step = {
+                    "step": len(plan_steps) + 1,
+                    "action": "请求用户输入",
+                    "tool_name": "user_input",  # 特殊工具名称，表示用户交互
+                    "tool_params": {
+                        "question": question,
+                        "context": context,
+                    }
+                }
                 
                 # 保存请求信息到状态中
                 result_state = {
@@ -343,6 +465,7 @@ class GraphExecutor:
                     "user_input_question": question,
                     "user_input_context": context,
                     "messages": messages,
+                    "plan_steps": plan_steps + [user_input_step],  # 添加用户交互步骤
                 }
                 logger.info(f"Decision node: Returning state with decision=request_input, keys: {list(result_state.keys())}")
                 return result_state
@@ -359,11 +482,55 @@ class GraphExecutor:
                 updated_plan_steps = list(plan_steps)
                 for new_step_data in next_steps:
                     step_number = len(updated_plan_steps) + 1
+                    
+                    # 验证步骤数据是否包含必需字段
+                    if "tool_name" not in new_step_data or "tool_params" not in new_step_data:
+                        missing_fields = []
+                        if "tool_name" not in new_step_data:
+                            missing_fields.append("tool_name")
+                        if "tool_params" not in new_step_data:
+                            missing_fields.append("tool_params")
+                        
+                        logger.error(
+                            f"Decision node: Step data missing required fields: {missing_fields}. "
+                            f"Step data: {new_step_data}. This step will be skipped."
+                        )
+                        continue  # 跳过这个步骤
+                    
+                    # 验证 tool_params 是字典类型
+                    tool_params = new_step_data.get("tool_params", {})
+                    if not isinstance(tool_params, dict):
+                        logger.error(
+                            f"Decision node: Step has invalid tool_params type. Step data: {new_step_data}. "
+                            f"tool_params must be a dict, but got {type(tool_params)}: {tool_params}"
+                        )
+                        continue  # 跳过这个步骤
+                    
+                    # 验证 tool_name 是否在可用工具列表中
+                    tool_name = new_step_data.get("tool_name", "")
+                    available_tools = [t.name for t in self.tools]
+                    if tool_name not in available_tools:
+                        logger.error(
+                            f"Decision node: Step has invalid tool_name. Step data: {new_step_data}. "
+                            f"tool_name '{tool_name}' is not in available tools: {available_tools}"
+                        )
+                        continue  # 跳过这个步骤
+                    
                     updated_plan_steps.append({
                         "step": step_number,
                         "action": new_step_data.get("action", "未知操作"),
-                        "target": new_step_data.get("target", ""),
+                        "tool_name": tool_name,
+                        "tool_params": tool_params,
                     })
+                
+                # 检查是否有有效的步骤被添加
+                if len(updated_plan_steps) == len(plan_steps):
+                    logger.error(
+                        f"Decision node: No valid steps were added. All steps from LLM were invalid. "
+                        f"Original plan_steps: {len(plan_steps)}, Updated plan_steps: {len(updated_plan_steps)}, "
+                        f"LLM next_steps: {next_steps}"
+                    )
+                    return {"should_continue": False, "messages": messages}
                 
                 logger.info(f"Decision node: Plan expanded from {len(plan_steps)} to {len(updated_plan_steps)} steps")
                 
@@ -520,6 +687,18 @@ class GraphExecutor:
 
         return {"messages": messages, "final_result": final_result}
 
+    def _should_execute_plan(self, state: AgentState) -> str:
+        """判断 plan 节点后应该执行什么：execute_step 还是 request_user_input"""
+        decision = state.get("decision")
+        logger.debug(f"_should_execute_plan: decision={decision}, state keys: {list(state.keys())}")
+        
+        if decision == "request_input":
+            logger.info(f"_should_execute_plan: decision=request_input, returning request_input")
+            return "request_input"
+        
+        logger.debug(f"_should_execute_plan: returning execute_step")
+        return "execute_step"
+    
     def _should_continue(self, state: AgentState) -> str:
         """判断下一步执行路径"""
         if not state["should_continue"]:
@@ -542,13 +721,43 @@ class GraphExecutor:
         logger.debug(f"_should_continue: returning continue")
         return "continue"
 
+    def _get_tools_schema_info(self) -> str:
+        """获取所有工具的参数 schema 信息"""
+        schema_info = []
+        for tool in self.tools:
+            tool_info = f"\n**{tool.name}**:"
+            if hasattr(tool, 'args_schema') and tool.args_schema:
+                try:
+                    schema = tool.args_schema.model_json_schema()
+                    properties = schema.get('properties', {})
+                    required = schema.get('required', [])
+                    params = []
+                    for param_name, param_info in properties.items():
+                        param_type = param_info.get('type', 'unknown')
+                        param_desc = param_info.get('description', '')
+                        is_required = param_name in required
+                        req_mark = "（必需）" if is_required else "（可选）"
+                        params.append(f"  - {param_name} ({param_type}){req_mark}: {param_desc}")
+                    if params:
+                        tool_info += "\n" + "\n".join(params)
+                except Exception as e:
+                    logger.warning(f"Failed to get schema for {tool.name}: {e}")
+                    tool_info += f"\n  参数: 请参考工具描述"
+            schema_info.append(tool_info)
+        return "\n".join(schema_info)
+
     def _build_initial_plan_prompt(
         self, input_text: str, context_files: Optional[List[Dict]]
     ) -> str:
         """构建初始计划生成的 prompt - 只生成第一步"""
         tools_description = "\n".join([f"- {tool.name}: {tool.description}" for tool in self.tools])
+        tools_schema = self._get_tools_schema_info()
 
-        prompt = f"""请分析以下问题，并制定**第一步**的分析计划（不要一次性规划所有步骤）。
+        prompt = f"""请分析以下问题，判断是否需要用户提供更多信息，或者可以开始分析。
+
+**重要决策：**
+- **如果信息不足，无法进行分析** → 回复 "action": "request_input"，并提供 "question" 字段
+- **如果信息足够，可以开始分析** → 回复 "action": "continue"，并提供 "next_steps" 数组（只包含第一步）
 
 用户问题：
 {input_text}
@@ -556,27 +765,106 @@ class GraphExecutor:
 可用工具：
 {tools_description}
 
-要求：
-1. **只规划第一步**，不要试图一次性规划完整流程
-2. 第一步应该是最关键的信息收集步骤（通常是代码搜索）
-3. 步骤必须具体、可执行，明确指定搜索目标
+工具参数说明：
+{tools_schema}
 
-**重要：**
-- 如果使用 code_search 工具，target 字段必须是**实际的搜索字符串**（例如：错误信息、函数名、变量名等），而不是中文描述
-- 如果用户输入包含错误信息，直接提取并使用该错误信息作为搜索字符串
-- target 应该是可以直接在代码中搜索的字符串，而不是"定位错误信息"这样的描述
-- 如果用户输入包含文件路径和行号（如 "file.py:42" 或 "file.py line 10-20"），可以在 target 中包含行号信息，系统会自动提取并只返回指定行的内容
+请按照以下 JSON 格式输出：
+```json
+{{
+  "action": "continue" 或 "request_input",
+  "reasoning": "决策理由",
+  "question": "如果需要用户输入，说明需要什么信息（仅在 action 为 request_input 时需要）",
+  "context": "可选的上下文信息（仅在 action 为 request_input 时可选）",
+  "next_steps": [
+    {{
+      "step": 1,
+      "action": "具体操作描述（中文）",
+      "tool_name": "工具名称（如 code_search、read、grep 等）",
+      "tool_params": {{
+        "参数名1": "参数值1",
+        "参数名2": "参数值2"
+      }}
+    }}
+  ]
+}}
+```
+
+**格式要求（必须严格遵守）：**
+- 如果 action 是 "request_input"，必须提供 question 字段，next_steps 可以为空
+- 如果 action 是 "continue"，next_steps 必须包含至少一个步骤，且每个步骤必须包含：step、action、tool_name、tool_params
+- tool_name 必须是工具列表中的准确名称
+- tool_params 必须是 JSON 对象，包含所有必需参数
+- 不要使用 target 字段（已废弃）
+- 格式不正确将导致执行失败！
+
+**重要：搜索字符串时的智能提取策略**
+当用户提供错误信息或日志内容时，如果完整字符串搜索可能没有结果，请智能提取关键部分进行搜索：
+- **提取原则**：优先提取错误消息的核心部分（去除时间戳、进程ID、日志级别等元数据）
+- **示例**：
+  - 完整错误：`'[55] [atb] [error] Message process fail. Result=-12'`
+  - 提取关键字符串：`'Message process fail'` 或 `'Result=-12'` 或 `'process fail'`
+  - 完整错误：`'FileNotFoundError: [Errno 2] No such file or directory: /path/to/file.txt'`
+  - 提取关键字符串：`'FileNotFoundError'` 或 `'No such file or directory'`
+- **搜索策略（优先级顺序，必须严格遵守）**：
+  1. 先尝试搜索完整字符串（如果字符串较短且明确）
+  2. **如果完整字符串搜索无结果（如 grep 或 code_search 返回无结果）** → **必须**先尝试提取关键词在代码中重试，而不是直接跳到日志搜索
+  3. 提取核心关键词进行搜索（去除元数据，保留核心错误消息）
+  4. 对于错误码（如 `Result=-12`），可以分别搜索错误码和错误消息
+  5. 对于包含特殊字符的字符串，提取纯文本部分进行搜索
+  6. **只有在代码搜索（grep、code_search）多次尝试都失败后，才考虑日志搜索**
+  7. **不要因为一次代码搜索失败就立即跳到日志搜索，应该先尝试提取关键词重试**
+
+**重要：文件类型选择**
+- **不要假设项目语言**：如果用户没有明确说明项目语言，不要默认搜索特定语言的文件（如 `*.py`）
+- **优先搜索所有文件类型**：除非用户明确指定文件类型，否则使用 `grep` 或 `code_search` 时不要限制文件类型（不要使用 `include` 参数）
+- **如果用户提到特定语言**：根据用户输入选择对应的文件类型（如 C++ 项目使用 `*.cpp`、`*.h`、`*.hpp`、`*.cc`、`*.cxx` 等）
+
+**🚨 格式要求（必须严格遵守，否则计划将无法执行并报错）：**
+
+**每个步骤必须包含以下字段：**
+1. `step`（必需）：步骤编号，从 1 开始
+2. `action`（必需）：操作描述（中文）
+3. `tool_name`（必需）：工具名称，必须是以下之一：code_search、read、grep、glob、bash、log_search、database_query、websearch、webfetch
+4. `tool_params`（必需）：工具参数对象，必须包含该工具的所有必需参数
+
+**严格禁止：**
+- 不要使用 target 字段（旧格式，已废弃）
+- 不要省略 tool_name 或 tool_params
+- 不要使用工具名称的变体或别名，必须完全匹配工具列表中的名称
+- 不要使用错误的参数名称，必须与工具参数说明完全一致（区分大小写）
+
+**参数要求：**
+- tool_params 必须是一个 JSON 对象（字典），不能是字符串、数组或其他类型
+- 参数名称必须与工具参数说明中的名称完全一致（区分大小写）
+- 参数值必须符合工具参数的类型要求：
+  - 字符串类型：使用双引号包裹，例如 "value"
+  - 数字类型：直接使用数字，例如 123
+  - 布尔类型：使用 true 或 false
+- 必须包含该工具的所有必需参数（在工具参数说明中标记为"必需"的参数）
+
+**如果格式不正确，系统将拒绝执行并报错！**
 
 示例：
-- ✅ 正确：如果用户输入包含 "FileNotFoundError: config.json"，则步骤1: 使用 code_search 工具搜索代码仓库中包含 "FileNotFoundError" 或 "config.json" 的代码片段 - 定位错误信息对应的代码位置
-- ✅ 正确：如果用户输入包含函数名 "processPayment"，则步骤1: 使用 code_search 工具搜索代码仓库中包含 "processPayment" 的函数定义 - 定位该函数的实现
-- ✅ 正确：如果用户输入包含 "src/utils.py:10-50"，则步骤1: 使用 code_search 工具查看文件 src/utils.py:10-50 - 查看第10-50行的代码
-- ❌ 错误：步骤1: 使用 code_search 工具搜索代码仓库 - [定位错误信息在代码中的具体位置，找到触发该错误的函数或逻辑分支]
+- 使用 code_search 工具搜索代码元素：
+  ```json
+  {{
+    "next_steps": [{{"step": 1, "action": "搜索代码元素", "tool_name": "code_search", "tool_params": {{"query": "elementName", "search_type": "auto"}}}}]
+  }}
+  ```
 
-请按照以下格式输出计划：
-步骤1: [具体操作] - [预期目标]
+- 使用 read 工具读取文件：
+  ```json
+  {{
+    "next_steps": [{{"step": 1, "action": "读取文件内容", "tool_name": "read", "tool_params": {{"file_path": "path/to/file.py"}}}}]
+  }}
+  ```
 
-其中，如果使用 code_search，操作中应包含实际的搜索字符串，target 字段也应该是该搜索字符串（可以包含行号范围）。"""
+- 使用 grep 工具搜索文本：
+  ```json
+  {{
+    "next_steps": [{{"step": 1, "action": "搜索文本模式", "tool_name": "grep", "tool_params": {{"pattern": "searchPattern"}}}}]
+  }}
+  ```"""
 
         if context_files:
             context_info = "\n".join(
@@ -644,7 +932,16 @@ class GraphExecutor:
                          "- 调整搜索策略\n" \
                          "- 或者基于已有信息（包括失败信息）得出结论\n"
 
+        tools_schema = self._get_tools_schema_info()
+        
         prompt = f"""你是一个智能分析 Agent。请根据已执行步骤的结果，动态决定下一步。
+
+**格式要求（必须严格遵守）：**
+- 如果 action 是 "continue"，next_steps 中的每个步骤必须包含：step、action、tool_name、tool_params
+- tool_name 必须是工具列表中的准确名称
+- tool_params 必须是 JSON 对象，包含所有必需参数
+- 不要使用 target 字段（已废弃）
+- 格式不正确将导致执行失败！
 
 原始问题：
 {input_text}
@@ -655,24 +952,32 @@ class GraphExecutor:
 可用工具：
 {tools_description}
 
+工具参数说明：
+{tools_schema}
+
 **重要要求：**
-1. 如果已有足够信息得出结论（包括基于失败信息可以推断的情况） → 回复 "action": "synthesize"，此时不需要 next_steps
-2. 如果需要继续收集信息（包括工具调用失败后需要尝试其他方法） → **必须**回复 "action": "continue"，并且 **必须**提供 next_steps 数组，至少包含一个步骤
-3. **如果选择 continue，next_steps 不能为空！** 必须明确指定下一步要执行的操作
-4. **如果步骤失败，请分析失败原因，决定是重试、换方法，还是基于已有信息得出结论**
-5. **如果发现信息不足，需要用户提供额外信息** → 回复 "action": "request_input"，并提供 "question" 字段说明需要什么信息以及为什么需要
+1. **如果信息不足，无法进行分析** → **必须**回复 "action": "request_input"，并提供 "question" 字段说明需要什么信息以及为什么需要。**不要**在这种情况下返回 "synthesize"！
+2. 如果已有足够信息得出结论（包括基于失败信息可以推断的情况） → 回复 "action": "synthesize"，此时不需要 next_steps
+3. 如果需要继续收集信息（包括工具调用失败后需要尝试其他方法） → **必须**回复 "action": "continue"，并且 **必须**提供 next_steps 数组，至少包含一个步骤
+4. **如果选择 continue，next_steps 不能为空！** 必须明确指定下一步要执行的操作
+5. **如果步骤失败，请分析失败原因，决定是重试、换方法，还是基于已有信息得出结论**
+6. **必须明确指定工具名称和参数**，使用 JSON 格式
 
-**关键：使用 code_search 时的 target 字段规则：**
-- target 必须是**实际的搜索字符串**（例如：错误信息、函数名、变量名等），而不是中文描述
-- 如果原始问题包含错误信息，直接提取并使用该错误信息作为 target
-- target 应该是可以直接在代码中搜索的字符串
-- 如果用户输入包含文件路径和行号（如 "file.py:42" 或 "file.py line 10-20"），可以在 target 中包含行号信息，系统会自动提取并只返回指定行的内容，减少上下文
-
-示例：
-- ✅ 正确（continue）：如果用户输入包含 "FileNotFoundError"，则 {{"action": "continue", "reasoning": "...", "next_steps": [{{"step": 2, "action": "使用 code_search 工具搜索代码仓库中包含 'FileNotFoundError' 的代码片段", "target": "FileNotFoundError"}}]}}
-- ✅ 正确（continue）：如果用户输入包含函数名 "processPayment"，则 {{"action": "continue", "reasoning": "...", "next_steps": [{{"step": 2, "action": "使用 code_search 工具搜索代码仓库中包含 'processPayment' 的函数定义", "target": "processPayment"}}]}}
-- ✅ 正确（request_input）：如果用户输入非常模糊（如"我的代码出错了"），缺少关键信息，则 {{"action": "request_input", "reasoning": "用户问题缺少具体的错误信息，无法进行有效分析", "question": "请提供具体的错误信息，包括：1) 错误类型（如 FileNotFoundError、ValueError 等）2) 错误消息 3) 相关的文件路径和行号（如果有）", "context": "当前只有模糊的问题描述，需要更多信息才能定位问题"}}
-- ❌ 错误：{{"action": "使用 code_search 工具搜索代码仓库", "target": "[定位错误信息在代码中的具体位置]"}}
+**重要：搜索字符串时的智能提取策略（必须严格遵守）**
+当搜索错误信息或日志内容时，如果完整字符串搜索可能没有结果，请智能提取关键部分：
+- **提取原则**：优先提取错误消息的核心部分（去除时间戳、进程ID、日志级别等元数据）
+- **示例**：
+  - 完整错误：`'[55] [atb] [error] Message process fail. Result=-12'`
+  - 提取关键字符串：`'Message process fail'` 或 `'process fail'` 或 `'Result=-12'`
+  - 完整错误：`'FileNotFoundError: [Errno 2] No such file or directory: /path/to/file.txt'`
+  - 提取关键字符串：`'FileNotFoundError'` 或 `'No such file or directory'`
+- **搜索策略（优先级顺序）**：
+  1. **如果完整字符串搜索失败（如 grep 或 code_search 返回无结果）** → **必须**先尝试提取关键词在代码中重试，而不是直接跳到日志搜索
+  2. 提取核心关键词进行搜索（去除元数据，保留核心错误消息）
+  3. 对于错误码（如 `Result=-12`），可以分别搜索错误码和错误消息
+  4. 对于包含特殊字符的字符串，提取纯文本部分进行搜索
+  5. **只有在代码搜索（grep、code_search）多次尝试都失败后，才考虑日志搜索**
+  6. **不要因为一次代码搜索失败就立即跳到日志搜索，应该先尝试提取关键词重试**
 
 请严格按照以下JSON格式回复（不要添加任何其他文本）：
 ```json
@@ -684,20 +989,84 @@ class GraphExecutor:
   "next_steps": [
     {{
       "step": {current_step + 1},
-      "action": "具体操作描述（如果使用 code_search，应包含实际的搜索字符串，例如：使用 code_search 工具搜索代码仓库中包含 'FileNotFoundError' 的代码片段）",
-      "target": "实际的搜索字符串（如果使用 code_search，必须是可以在代码中直接搜索的字符串，例如：'FileNotFoundError'、'processPayment' 或 'src/utils.py:10-50'，而不是中文描述）"
+      "action": "具体操作描述（中文）",
+      "tool_name": "工具名称（如 code_search、read、grep、glob 等）",
+      "tool_params": {{
+        "参数名1": "参数值1",
+        "参数名2": "参数值2"
+      }}
     }}
   ]
 }}
 ```
 
-**注意：**
-- 如果 action 是 "continue"，next_steps 必须是一个非空数组
-- 如果 action 是 "synthesize"，next_steps 可以为空数组或省略
-- 如果 action 是 "request_input"，必须提供 question 字段，context 字段可选，next_steps 可以为空（用户回复后再决定下一步）
-- **如果使用 code_search，target 必须是实际的搜索字符串，不是中文描述！**
-- **如果查看文件，可以在文件路径后添加行号范围（如 'file.py:10-50'），减少返回的上下文**
-- 请确保 JSON 格式正确，可以直接被解析"""
+**🚨 格式要求（必须严格遵守，否则计划将无法执行并报错）：**
+
+**如果 action 是 "continue"：**
+- `next_steps` 必须是一个非空数组 `[]`，至少包含一个步骤
+- **每个步骤必须包含以下字段：**
+  1. `step`（必需）：步骤编号
+  2. `action`（必需）：操作描述（中文）
+  3. `tool_name`（必需）：工具名称，必须是以下之一：code_search、read、grep、glob、bash、log_search、database_query、websearch、webfetch
+  4. `tool_params`（必需）：工具参数对象，必须包含该工具的所有必需参数
+
+**如果 action 是 "synthesize"：**
+- `next_steps` 可以为空数组 `[]` 或省略
+
+**如果 action 是 "request_input"：**
+- 必须提供 `question` 字段
+- `context` 字段可选
+- `next_steps` 可以为空（用户回复后再决定下一步）
+
+**严格禁止：**
+- 不要使用 target 字段（旧格式，已废弃）
+- 不要省略 tool_name 或 tool_params
+- 不要使用工具名称的变体或别名，必须完全匹配工具列表中的名称
+- 不要使用错误的参数名称，必须与工具参数说明完全一致（区分大小写）
+
+**参数要求：**
+- tool_params 必须是一个 JSON 对象（字典），不能是字符串、数组或其他类型
+- 参数名称必须与工具参数说明中的名称完全一致（区分大小写）
+- 参数值必须符合工具参数的类型要求（字符串用双引号、数字直接写、布尔用 true/false）
+- 必须包含该工具的所有必需参数
+
+**如果格式不正确，系统将拒绝执行并报错！请仔细检查每个步骤的格式！**
+
+示例：
+- action 为 "continue"：
+  ```json
+  {{
+    "action": "continue",
+    "reasoning": "需要继续收集信息",
+    "next_steps": [
+      {{
+        "step": {current_step + 1},
+        "action": "执行操作描述",
+        "tool_name": "grep",
+        "tool_params": {{"pattern": "searchPattern"}}
+      }}
+    ]
+  }}
+  ```
+
+- action 为 "synthesize"：
+  ```json
+  {{
+    "action": "synthesize",
+    "reasoning": "已有足够信息得出结论",
+    "next_steps": []
+  }}
+  ```
+
+- action 为 "request_input"：
+  ```json
+  {{
+    "action": "request_input",
+    "reasoning": "需要用户提供额外信息",
+    "question": "请提供所需的信息",
+    "context": "可选的上下文说明"
+  }}
+  ```"""
 
         return prompt
 
@@ -755,92 +1124,6 @@ class GraphExecutor:
 
         return prompt
 
-    def _map_action_to_tool(self, action: str) -> str:
-        """将计划步骤的 action 映射到工具名称"""
-        action_lower = action.lower()
-
-        if "代码" in action_lower or "code" in action_lower or "文件" in action_lower:
-            return "code_search"
-        elif "日志" in action_lower or "log" in action_lower:
-            return "log_search"
-        elif "数据库" in action_lower or "database" in action_lower or "db" in action_lower:
-            return "database_query"
-        else:
-            # 默认使用代码搜索
-            return "code_search"
-
-    def _build_tool_input(self, step: Dict, state: AgentState) -> Dict[str, Any]:
-        """根据步骤和当前状态构建工具输入"""
-        action = step.get("action", "")
-        target = step.get("target", "")
-        step_results = state["step_results"]
-        original_input = state.get("original_input", "")
-
-        # 如果是代码搜索，尝试从之前的步骤结果中提取相关信息
-        if self._map_action_to_tool(action) == "code_search":
-            if target:
-                query = target
-                # 如果 target 是中文描述，尝试从原始输入中提取实际的错误字符串
-                if self._is_chinese_description(query):
-                    extracted_query = self._extract_error_string_from_input(original_input)
-                    if extracted_query:
-                        logger.info(f"Extracted error string from input: {extracted_query}, using it instead of Chinese description")
-                        query = extracted_query
-            else:
-                # 如果没有明确的目标，从之前的结果中提取
-                query = self._extract_query_from_results(step_results)
-                if not query:
-                    # 如果还是找不到，尝试从原始输入中提取
-                    query = self._extract_error_string_from_input(original_input) or "error"
-            
-            # 从查询中提取行号范围（如果包含）
-            line_start, line_end = self._extract_line_range_from_query(query)
-            
-            # 如果提取到行号，清理 query（移除行号部分），保留文件路径
-            clean_query = query
-            search_type = "auto"  # 初始化搜索类型
-            if line_start:
-                import re
-                # 移除行号部分，保留文件路径
-                clean_query = re.sub(r':\d+(?:[-:]?\d+)?', '', query)
-                clean_query = re.sub(r'\s+line[s]?\s+\d+(?:\s*[-–]\s*\d+)?', '', clean_query, flags=re.IGNORECASE)
-                clean_query = clean_query.strip()
-                # 如果清理后的 query 看起来像文件路径，设置 search_type 为 "file"
-                if clean_query.endswith(('.py', '.js', '.ts', '.java', '.cpp', '.h', '.c', '.hpp', '.go', '.rs')) or '/' in clean_query or '\\' in clean_query:
-                    search_type = "file"
-            
-            # 从 action 中推断搜索类型（如果还没有设置）
-            if search_type == "auto":
-                action_lower = action.lower()
-                if "函数" in action or "function" in action_lower:
-                    search_type = "function"
-                elif "类" in action or "class" in action_lower:
-                    search_type = "class"
-                elif "变量" in action or "variable" in action_lower:
-                    search_type = "variable"
-                elif "字符串" in action or "string" in action_lower:
-                    search_type = "string"
-                elif "文件" in action or "file" in action_lower or clean_query.endswith(('.py', '.js', '.ts', '.java', '.cpp', '.h')):
-                    search_type = "file"
-
-            return {
-                "query": clean_query, 
-                "search_type": search_type,
-                "line_start": line_start,
-                "line_end": line_end,
-                "max_results": 10, 
-                "include_context": True
-            }
-
-        # 日志搜索
-        if self._map_action_to_tool(action) == "log_search":
-            return {"query": target or "error OR exception", "time_range": "1h"}
-
-        # 数据库查询
-        if self._map_action_to_tool(action) == "database_query":
-            return {"query": target or "SELECT * FROM logs ORDER BY timestamp DESC LIMIT 100"}
-
-        return {"query": target}
 
     def _call_tool_directly(self, tool_name: str, tool_input: Dict) -> str:
         """直接调用工具（不通过 ToolNode）"""
@@ -848,86 +1131,108 @@ class GraphExecutor:
             if tool.name == tool_name:
                 logger.info(f"Calling tool: {tool_name} with input: {tool_input}")
 
-                # 根据工具类型调用不同的方法
-                if hasattr(tool, "_run"):
-                    result = tool._run(**tool_input)
-                else:
-                    # 兼容旧版本
-                    from langchain_core.tools import BaseTool
-
-                    if isinstance(tool, BaseTool):
-                        result = tool.run(tool_input)
+                try:
+                    # 根据工具类型调用不同的方法
+                    if hasattr(tool, "_run"):
+                        result = tool._run(**tool_input)
                     else:
-                        result = str(tool.invoke(tool_input))
+                        # 兼容旧版本
+                        from langchain_core.tools import BaseTool
 
-                return str(result)
+                        if isinstance(tool, BaseTool):
+                            result = tool.run(tool_input)
+                        else:
+                            result = str(tool.invoke(tool_input))
 
-        raise ValueError(f"Tool not found: {tool_name}")
+                    logger.info(f"Tool {tool_name} executed successfully")
+                    return str(result)
+                except TypeError as e:
+                    # 参数错误，记录详细信息
+                    error_msg = f"Tool {tool_name} execution failed with TypeError: {str(e)}. Input: {tool_input}"
+                    logger.error(error_msg, exc_info=True)
+                    raise ValueError(error_msg) from e
+                except Exception as e:
+                    # 其他错误
+                    error_msg = f"Tool {tool_name} execution failed: {str(e)}"
+                    logger.error(error_msg, exc_info=True)
+                    raise
+
+        error_msg = f"Tool not found: {tool_name}. Available tools: {[t.name for t in self.tools]}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
 
     def _parse_plan(self, plan_text: str) -> List[Dict[str, Any]]:
-        """解析 LLM 生成的计划文本"""
+        """解析 LLM 生成的计划文本，提取工具名称和参数"""
         import re
         steps = []
         
         # 首先尝试从 JSON 中提取 next_steps
         try:
-            json_match = re.search(r'"next_steps"\s*:\s*\[([\s\S]*?)\]', plan_text)
+            # 尝试提取完整的 JSON 对象（包含 next_steps）
+            json_match = re.search(r'\{[\s\S]*"next_steps"[\s\S]*?\}', plan_text)
             if json_match:
-                # 尝试解析 next_steps 数组
-                next_steps_str = json_match.group(0)
-                # 提取完整的 JSON 对象
-                full_json_match = re.search(r'\{[\s\S]*"next_steps"[\s\S]*?\}', plan_text)
-                if full_json_match:
-                    parsed = json.loads(full_json_match.group(0))
-                    if "next_steps" in parsed and isinstance(parsed["next_steps"], list):
-                        for step_data in parsed["next_steps"]:
-                            if isinstance(step_data, dict):
-                                steps.append({
-                                    "step": step_data.get("step", len(steps) + 1),
-                                    "action": step_data.get("action", ""),
-                                    "target": step_data.get("target", ""),
-                                    "status": "pending"
-                                })
-                        if steps:
-                            return steps
-        except:
-            pass
+                parsed = json.loads(json_match.group(0))
+                if "next_steps" in parsed and isinstance(parsed["next_steps"], list):
+                    for step_data in parsed["next_steps"]:
+                        if isinstance(step_data, dict):
+                            step_dict = {
+                                "step": step_data.get("step", len(steps) + 1),
+                                "action": step_data.get("action", ""),
+                                "status": "pending"
+                            }
+                            # 必须包含工具名称和参数，否则记录错误
+                            if "tool_name" in step_data and "tool_params" in step_data:
+                                tool_name = step_data["tool_name"]
+                                tool_params = step_data.get("tool_params", {})
+                                
+                                # 验证 tool_params 是字典类型
+                                if not isinstance(tool_params, dict):
+                                    logger.error(
+                                        f"Plan step has invalid tool_params type. Step data: {step_data}. "
+                                        f"tool_params must be a JSON object (dict), but got {type(tool_params)}: {tool_params}"
+                                    )
+                                    continue
+                                
+                                # 验证 tool_name 是否在可用工具列表中
+                                available_tools = [t.name for t in self.tools]
+                                if tool_name not in available_tools:
+                                    logger.error(
+                                        f"Plan step has invalid tool_name. Step data: {step_data}. "
+                                        f"tool_name '{tool_name}' is not in available tools: {available_tools}"
+                                    )
+                                    continue
+                                
+                                step_dict["tool_name"] = tool_name
+                                step_dict["tool_params"] = tool_params
+                                steps.append(step_dict)
+                            else:
+                                # 如果缺少 tool_name 或 tool_params，记录详细错误并跳过该步骤
+                                missing_fields = []
+                                if "tool_name" not in step_data:
+                                    missing_fields.append("tool_name")
+                                if "tool_params" not in step_data:
+                                    missing_fields.append("tool_params")
+                                
+                                logger.error(
+                                    f"Plan step missing required fields: {missing_fields}. Step data: {step_data}. "
+                                    f"Each step MUST include 'tool_name' and 'tool_params' fields. "
+                                    f"Example format: {{'step': 1, 'action': '...', 'tool_name': 'read', 'tool_params': {{'file_path': '...'}}}}"
+                                )
+                                # 不添加该步骤，让执行流程处理错误
+                    if steps:
+                        return steps
+        except Exception as e:
+            logger.error(f"Failed to parse plan JSON: {e}. Plan text: {plan_text[:500]}")
         
-        # 如果 JSON 解析失败，尝试从文本中提取
-        lines = plan_text.split("\n")
+        # 如果 JSON 解析失败，返回空列表（不再支持文本格式，因为无法提供 tool_name 和 tool_params）
+        if not steps:
+            logger.error(
+                f"Failed to parse plan. Plan must be in JSON format with tool_name and tool_params. "
+                f"Plan text: {plan_text[:500]}"
+            )
         
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            # 匹配 "步骤N: 操作 - 目标" 格式
-            step_pattern = r"步骤\s*(\d+)\s*[:：]\s*(.+?)(?:\s*-\s*(.+))?$"
-            match = re.match(step_pattern, line)
-
-            if match:
-                step_num = int(match.group(1))
-                action = match.group(2).strip()
-                target = match.group(3).strip() if match.group(3) else ""
-
-                steps.append(
-                    {"step": step_num, "action": action, "target": target, "status": "pending"}
-                )
-            else:
-                # 尝试匹配 "action": "xxx", "target": "xxx" 格式（从 JSON 片段中提取）
-                action_match = re.search(r'"action"\s*:\s*"([^"]+)"', line)
-                target_match = re.search(r'"target"\s*:\s*"([^"]+)"', line)
-                if action_match:
-                    action = action_match.group(1)
-                    target = target_match.group(1) if target_match else ""
-                    steps.append({
-                        "step": len(steps) + 1,
-                        "action": action,
-                        "target": target,
-                        "status": "pending"
-                    })
-
         return steps
+
 
     def _parse_decision(self, llm_response: str) -> Dict[str, Any]:
         """解析 LLM 的决策响应"""
@@ -1004,7 +1309,7 @@ class GraphExecutor:
                     # 如果 reasoning 包含有用的信息，可以基于它生成问题
                     if reasoning:
                         # 尝试从 reasoning 中提取问题
-                        question = f"根据您的描述，我需要更多信息来帮助分析问题。{reasoning[:200]}"
+                        question = f"根据您的描述，我需要更多信息来继续分析。{reasoning[:200]}"
                         logger.info(f"[_parse_decision] Generated question from reasoning: {question[:200]}")
                     else:
                         # 回退到 synthesize
@@ -1041,16 +1346,73 @@ class GraphExecutor:
                             'next_steps': []
                         }
                 else:
+                    # 验证 next_steps 中的每个步骤是否包含必需字段
+                    validated_steps = []
+                    for step in next_steps:
+                        if not isinstance(step, dict):
+                            logger.warning(f"[_parse_decision] Step is not a dict: {step}")
+                            continue
+                        
+                        if "tool_name" not in step or "tool_params" not in step:
+                            missing_fields = []
+                            if "tool_name" not in step:
+                                missing_fields.append("tool_name")
+                            if "tool_params" not in step:
+                                missing_fields.append("tool_params")
+                            
+                            logger.warning(
+                                f"[_parse_decision] Step missing required fields: {missing_fields}. "
+                                f"Step data: {step}. This step will be skipped."
+                            )
+                            continue
+                        
+                        # 验证 tool_params 是字典类型
+                        tool_params = step.get("tool_params", {})
+                        if not isinstance(tool_params, dict):
+                            logger.warning(
+                                f"[_parse_decision] Step has invalid tool_params type. Step data: {step}. "
+                                f"tool_params must be a dict, but got {type(tool_params)}: {tool_params}"
+                            )
+                            continue
+                        
+                        validated_steps.append(step)
+                    
+                    if not validated_steps:
+                        logger.error(
+                            f"[_parse_decision] All steps in next_steps are invalid. "
+                            f"Original next_steps: {next_steps}"
+                        )
+                        return {
+                            'action': 'synthesize',
+                            'reasoning': reasoning or llm_response[:200] + " (所有步骤格式无效)",
+                            'next_steps': []
+                        }
+                    
                     return {
                         'action': 'continue',
                         'reasoning': reasoning or llm_response[:200],
-                        'next_steps': next_steps
+                        'next_steps': validated_steps
                     }
         
         # 如果无法解析 JSON，使用文本分析作为后备
         logger.warning(f"[_parse_decision] Failed to parse JSON, falling back to text analysis. Response: {llm_response[:300]}")
         llm_lower = llm_response.lower()
-        if 'synthesize' in llm_lower or '足够' in llm_response or '结束' in llm_response:
+        
+        # 优先检查是否需要用户输入（通用的关键词检测）
+        if ('request_input' in llm_lower or '请求' in llm_response or '需要' in llm_response or 
+            '信息不足' in llm_response or '缺少' in llm_response or '无法' in llm_response):
+            # 尝试从文本中提取问题
+            question_match = re.search(r'问题[：:]\s*(.+?)(?:\n|$)', llm_response)
+            question = question_match.group(1).strip() if question_match else "请提供更多信息以继续分析。"
+            return {
+                'action': 'request_input',
+                'reasoning': llm_response[:200],
+                'question': question,
+                'context': llm_response[:500],
+                'next_steps': []
+            }
+        
+        if 'synthesize' in llm_lower or '足够' in llm_response or '结束' in llm_response or '完成' in llm_response:
             return {'action': 'synthesize', 'reasoning': llm_response[:200], 'next_steps': []}
         else:
             # 默认继续，尝试从文本中提取步骤
@@ -1317,100 +1679,6 @@ class GraphExecutor:
 
         return False
 
-    def _extract_query_from_results(self, step_results: List[Dict]) -> str:
-        """从已有结果中提取查询关键词"""
-        for result in step_results:
-            if result.get("status") == "completed":
-                content = result.get("result", "")
-                # 提取文件名、错误信息等关键词
-                import re
-
-                if match := re.search(r'File\s+"([^"]+)"', content):
-                    return match.group(1)
-                if match := re.search(r"error:\s*(.+)", content, re.IGNORECASE):
-                    return match.group(1)
-
-        return "error"
-    
-    def _is_chinese_description(self, text: str) -> bool:
-        """判断文本是否是中文描述（而不是实际的错误字符串）"""
-        if not text:
-            return False
-        
-        # 如果包含中文字符，且长度较长，可能是中文描述
-        import re
-        has_chinese = bool(re.search(r'[\u4e00-\u9fff]', text))
-        is_long = len(text) > 30
-        
-        # 如果包含常见的描述性词汇，更可能是描述
-        description_keywords = ['定位', '找到', '搜索', '查询', '分析', '获取', '提取', '确认']
-        has_keywords = any(keyword in text for keyword in description_keywords)
-        
-        return has_chinese and (is_long or has_keywords)
-    
-    def _extract_error_string_from_input(self, input_text: str) -> str:
-        """从原始输入中提取实际的错误字符串"""
-        if not input_text:
-            return ""
-        
-        import re
-        
-        # 尝试提取引号中的字符串（可能是错误信息）
-        # 匹配单引号或双引号中的内容
-        quoted_strings = re.findall(r'["\']([^"\']+)["\']', input_text)
-        for quoted in quoted_strings:
-            # 如果包含英文和常见错误关键词，可能是错误信息
-            if re.search(r'[a-zA-Z]', quoted) and len(quoted) > 10:
-                # 检查是否包含常见的错误关键词
-                error_keywords = ['error', 'fail', 'exception', 'no', 'not found', 'missing', 'tag', 'when']
-                if any(keyword.lower() in quoted.lower() for keyword in error_keywords):
-                    return quoted
-        
-        # 尝试提取日志格式的错误信息（例如：no targetStrategy tag when determinePerf）
-        # 匹配类似 "no ... when ..." 的模式
-        error_patterns = [
-            r'no\s+\w+\s+\w+.*when\s+\w+',  # no targetStrategy tag when determinePerf
-            r'error:\s*([^\n]+)',  # error: ...
-            r'Error:\s*([^\n]+)',  # Error: ...
-            r'failed\s+to\s+([^\n]+)',  # failed to ...
-        ]
-        
-        for pattern in error_patterns:
-            match = re.search(pattern, input_text, re.IGNORECASE)
-            if match:
-                error_str = match.group(1) if match.lastindex else match.group(0)
-                if len(error_str.strip()) > 5:
-                    return error_str.strip()
-        
-        return ""
-    
-    def _extract_line_range_from_query(self, query: str) -> tuple[Optional[int], Optional[int]]:
-        """从查询中提取行号范围
-        
-        支持的格式：
-        - "file.py:10" -> (10, None)
-        - "file.py:10-20" -> (10, 20)
-        - "file.py:10:20" -> (10, 20)
-        - "file.py line 10" -> (10, None)
-        - "file.py lines 10-20" -> (10, 20)
-        """
-        import re
-        
-        # 匹配 file.py:10 或 file.py:10-20 格式
-        match = re.search(r':(\d+)(?:[-:](\d+))?', query)
-        if match:
-            line_start = int(match.group(1))
-            line_end = int(match.group(2)) if match.group(2) else None
-            return line_start, line_end
-        
-        # 匹配 "line 10" 或 "lines 10-20" 格式
-        match = re.search(r'line[s]?\s+(\d+)(?:\s*[-–]\s*(\d+))?', query, re.IGNORECASE)
-        if match:
-            line_start = int(match.group(1))
-            line_end = int(match.group(2)) if match.group(2) else None
-            return line_start, line_end
-        
-        return None, None
 
     def _format_step_results(self, steps: List[Dict], results: List[Dict]) -> str:
         """格式化步骤结果"""
@@ -1579,7 +1847,23 @@ class GraphExecutor:
 
         # 流式执行图
         async for state in self.graph.astream(initial_state):
-            logger.info(f"GraphExecutor state update: keys={list(state.keys())}, has_plan_steps={bool(state.get('plan_steps'))}")
+            logger.info(f"GraphExecutor state update: keys={list(state.keys())}, has_plan_steps={bool(state.get('plan_steps'))}, decision={state.get('decision')}")
+            
+            # 检查是否需要请求用户输入（优先处理，确保及时发送）
+            if state.get("decision") == "request_input":
+                user_input_question = state.get("user_input_question", "")
+                user_input_context = state.get("user_input_context", "")
+                logger.info(f"GraphExecutor: Detected request_input decision, yielding user_input_request event")
+                yield {
+                    "event": "user_input_request",
+                    "data": {
+                        "request_id": state.get("request_id", ""),
+                        "question": user_input_question,
+                        "context": user_input_context,
+                    }
+                }
+                # 更新 initial_state 以避免重复发送
+                initial_state["decision"] = "request_input"
             
             # 检查状态变化，发送进度更新
             if state.get("plan_steps"):
@@ -1605,6 +1889,8 @@ class GraphExecutor:
                         "step": "graph_execution",
                     },
                 }
+                # 更新 initial_state 以避免重复发送
+                initial_state["step_results"] = state["step_results"]
 
             if state.get("final_result"):
                 yield {"event": "result", "data": state["final_result"]}

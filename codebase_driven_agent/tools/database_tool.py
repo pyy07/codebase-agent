@@ -33,21 +33,27 @@ class DatabaseTool(BaseCodebaseTool):
     用于查询和分析数据库。
     
     功能：
-    - 执行 SELECT 查询（只读操作）
-    - 获取数据库表结构（Schema）
-    - 自动清理敏感数据（password, secret 等字段）
-    - 自动限制查询结果数量
+    - 执行数据库查询（只读操作）
+    - 获取数据库表结构信息
+    - 查询数据记录
+    - 自动处理敏感数据
+    
+    使用场景：
+    - 查询数据库中的数据
+    - 查看表结构和字段信息
+    - 分析数据状态和关系
+    - 验证数据一致性
+    
+    参数：
+    - action（必需）：操作类型，"schema" 获取表结构，"query" 执行查询
+    - sql（可选）：SQL 查询语句，当 action="query" 时必需
+    - table_name（可选）：表名，当 action="schema" 时可选，不提供则返回所有表
+    - limit（可选）：查询结果限制，默认 100
     
     使用示例：
     - action: "schema" - 获取所有表的结构信息
     - action: "schema", table_name: "users" - 获取 users 表的结构
     - action: "query", sql: "SELECT * FROM users WHERE id = 1" - 执行查询
-    
-    安全限制：
-    - 只允许 SELECT 查询
-    - 禁止 INSERT, UPDATE, DELETE, DROP 等写操作
-    - 自动清理敏感字段（password, secret, token 等）
-    - 查询结果自动限制为 100 行
     """
     args_schema: type[DatabaseToolInput] = DatabaseToolInput
     

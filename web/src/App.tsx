@@ -534,8 +534,23 @@ function App() {
 
   const handleUserInputRequest = useCallback((request: UserInputRequestData) => {
     console.log('[App] User input request received:', request)
+    console.log('[App] Request details:', {
+      request_id: request.request_id,
+      question: request.question?.substring(0, 100),
+      context: request.context?.substring(0, 100),
+      timestamp: request.timestamp
+    })
     updateAssistantMessage(contents => {
+      // 检查是否已存在相同的请求（避免重复添加）
+      const existingRequest = contents.find(
+        c => c.type === 'user_input_request' && c.data.request_id === request.request_id
+      )
+      if (existingRequest) {
+        console.log('[App] Request already exists, skipping:', request.request_id)
+        return contents
+      }
       // 添加用户输入请求到消息内容
+      console.log('[App] Adding new user input request to contents')
       return [...contents, { type: 'user_input_request' as const, data: request }]
     })
   }, [updateAssistantMessage])
