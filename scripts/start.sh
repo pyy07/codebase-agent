@@ -58,13 +58,13 @@ docker-compose -f $COMPOSE_FILE ps
 # 检查健康状态
 echo "🏥 检查健康状态..."
 for i in {1..30}; do
-    if python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" &> /dev/null 2>&1 || curl -f http://localhost:8000/health &> /dev/null 2>&1; then
+    if python -c "import urllib.request; urllib.request.urlopen('http://localhost:7000/health')" &> /dev/null 2>&1 || curl -f http://localhost:7000/health &> /dev/null 2>&1; then
         echo "✅ 服务已启动并健康！"
         echo ""
         echo "📝 访问信息："
-        echo "   - API 文档: http://localhost:8000/docs"
-        echo "   - 健康检查: http://localhost:8000/health"
-        echo "   - 服务信息: http://localhost:8000/api/v1/info"
+        echo "   - API 文档: http://localhost:7000/docs"
+        echo "   - 健康检查: http://localhost:7000/health"
+        echo "   - 服务信息: http://localhost:7000/api/v1/info"
         echo ""
         echo "📋 查看日志: docker-compose -f $COMPOSE_FILE logs -f"
         echo "🛑 停止服务: docker-compose -f $COMPOSE_FILE down"

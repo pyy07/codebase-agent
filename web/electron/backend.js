@@ -10,7 +10,7 @@ const execAsync = promisify(exec)
 class BackendManager {
   constructor() {
     this.process = null
-    this.backendPort = 8000
+    this.backendPort = 7000
     this.pythonPath = null
     this.backendReady = false
     this.isStopping = false // 防止重复调用 stop

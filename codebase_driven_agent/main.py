@@ -293,7 +293,7 @@ if __name__ == "__main__":
         uvicorn.run(
             app, 
             host="0.0.0.0", 
-            port=8000,
+            port=7000,
             log_level=settings.log_level.lower(),
             timeout_keep_alive=2,  # 减少 keep-alive 超时，加快关闭
         )

@@ -49,10 +49,10 @@ except ImportError:
 
 class CodeToolInput(BaseModel):
     """代码工具输入参数"""
-    query: str = Field(..., description="要搜索的代码元素（函数名、类名、变量名、字符串字面量等）")
+    query: str = Field(..., description="要搜索的代码元素（函数名、类名、变量名、字符串字面量等）或文件路径（用于关系分析）")
     search_type: Optional[str] = Field(
         "auto", 
-        description="搜索类型：'function'（函数名）、'class'（类名）、'variable'（变量名）、'string'（字符串字面量）、'method'（类方法）、'call'（函数调用位置）、'import'（导入语句）、'constant'（常量）、'enum'（枚举）、'interface'（接口）、'namespace'（命名空间）、'macro'（宏定义）、'decorator'（装饰器）、'type'（类型别名）、'auto'（自动检测）"
+        description="搜索类型：'function'（函数名）、'class'（类名）、'variable'（变量名）、'string'（字符串字面量）、'method'（类方法）、'call'（函数调用位置）、'import'（导入语句）、'constant'（常量）、'enum'（枚举）、'interface'（接口）、'namespace'（命名空间）、'macro'（宏定义）、'decorator'（装饰器）、'type'（类型别名）、'call_graph'（函数调用关系图）、'inheritance'（类继承关系）、'dependencies'（模块依赖关系）、'auto'（自动检测）"
     )
     file_path: Optional[str] = Field(None, description="限制搜索范围到特定文件路径（可选）")
     max_results: int = Field(10, description="返回的最大结果数量")
@@ -81,7 +81,9 @@ class CodeTool(BaseCodebaseTool):
     - 宏定义搜索：查找宏定义（C/C++）
     - 装饰器搜索：查找装饰器使用（Python）
     - 类型别名搜索：查找类型别名定义（TypeScript）
-    - 函数调用链追踪：追踪函数之间的调用关系
+    - 函数调用关系图：构建文件的函数调用关系图，用于追踪错误传播路径、理解代码执行流程、识别影响范围
+    - 类继承关系分析：分析类的继承层次结构，用于理解类的设计、识别需要重构的类、分析多态行为
+    - 模块依赖关系分析：分析模块的导入和依赖关系，用于理解代码组织结构、识别循环依赖、分析模块间耦合度
     
     使用场景：
     - 查找函数定义和调用位置
@@ -93,6 +95,9 @@ class CodeTool(BaseCodebaseTool):
     - 查找导入语句
     - 查找常量、枚举、接口等定义
     - 追踪函数调用关系
+    - 构建函数调用关系图（用于错误追踪、影响范围分析）
+    - 分析类继承关系（用于架构分析、重构规划）
+    - 分析模块依赖关系（用于识别循环依赖、评估耦合度）
     
     参数：
     - query（必需）：要搜索的代码元素名称
@@ -111,6 +116,9 @@ class CodeTool(BaseCodebaseTool):
       * "macro"：宏定义（C/C++）
       * "decorator"：装饰器（Python）
       * "type"：类型别名（TypeScript）
+      * "call_graph"：函数调用关系图（需要提供文件路径，分析文件内所有函数的调用关系）
+      * "inheritance"：类继承关系（需要提供文件路径，分析文件内所有类的继承关系）
+      * "dependencies"：模块依赖关系（需要提供文件路径，分析文件的导入和依赖关系）
       * "auto"：自动检测类型（默认）
     - file_path（可选）：限制搜索范围到特定文件路径
     - max_results（可选）：返回的最大结果数量，默认 10
@@ -126,6 +134,9 @@ class CodeTool(BaseCodebaseTool):
     - query: "MAX_SIZE", search_type: "constant" - 搜索常量
     - query: "string to find", search_type: "string" - 搜索包含该字符串字面量的代码
     - query: "processPayment", search_type: "auto" - 自动检测类型并搜索
+    - query: "PaymentService.py", search_type: "call_graph" - 构建 PaymentService.py 文件的函数调用关系图
+    - query: "UserService.java", search_type: "inheritance" - 分析 UserService.java 文件的类继承关系
+    - query: "utils.py", search_type: "dependencies" - 分析 utils.py 文件的模块依赖关系
     """
     args_schema: type[CodeToolInput] = CodeToolInput
     
@@ -724,6 +735,83 @@ class CodeTool(BaseCodebaseTool):
             logger.debug(f"Git operation failed: {str(e)}")
             return None
     
+    def _format_call_graph(self, graph: Dict[str, Any]) -> str:
+        """格式化函数调用关系图输出"""
+        if not graph or not graph.get('nodes'):
+            return "未找到函数调用关系（文件中可能没有函数定义）"
+        
+        result = []
+        result.append("=" * 80)
+        result.append("函数调用关系图")
+        result.append("=" * 80)
+        result.append(f"节点数量（函数定义）: {len(graph['nodes'])}")
+        result.append(f"边数量（调用关系）: {len(graph['edges'])}")
+        result.append("")
+        
+        result.append("函数列表（节点）:")
+        for node in graph['nodes']:
+            result.append(f"  - {node['name']} ({node['file_path']}:{node['line']}:{node['column']})")
+        result.append("")
+        
+        if graph['edges']:
+            result.append("调用关系（边）:")
+            for edge in graph['edges']:
+                result.append(f"  {edge['from_function']} -> {edge['to_function']} ({edge['file_path']}:{edge['line']}:{edge['column']})")
+        else:
+            result.append("调用关系: 未找到函数调用（函数可能没有调用其他函数）")
+        
+        result.append("=" * 80)
+        return "\n".join(result)
+    
+    def _format_inheritance(self, inheritance_list: List[Dict[str, Any]]) -> str:
+        """格式化类继承关系输出"""
+        if not inheritance_list:
+            return "未找到类继承关系（文件中可能没有类定义）"
+        
+        result = []
+        result.append("=" * 80)
+        result.append("类继承关系分析")
+        result.append("=" * 80)
+        result.append(f"找到 {len(inheritance_list)} 个类:")
+        result.append("")
+        
+        for cls in inheritance_list:
+            result.append(f"类名: {cls['class_name']}")
+            if cls['parent_classes']:
+                result.append(f"  父类: {', '.join(cls['parent_classes'])}")
+            else:
+                result.append(f"  父类: 无（基类）")
+            result.append(f"  位置: {cls['file_path']}:{cls['line']}:{cls['column']}")
+            result.append("")
+        
+        result.append("=" * 80)
+        return "\n".join(result)
+    
+    def _format_dependencies(self, dependencies_list: List[Dict[str, Any]]) -> str:
+        """格式化模块依赖关系输出"""
+        if not dependencies_list:
+            return "未找到模块依赖关系（文件中可能没有导入语句）"
+        
+        result = []
+        result.append("=" * 80)
+        result.append("模块依赖关系分析")
+        result.append("=" * 80)
+        result.append(f"找到 {len(dependencies_list)} 个依赖:")
+        result.append("")
+        
+        for dep in dependencies_list:
+            result.append(f"模块名: {dep['module_name']}")
+            result.append(f"  导入类型: {dep['import_type']}")
+            if dep['imported_items']:
+                result.append(f"  导入项: {', '.join(dep['imported_items'])}")
+            else:
+                result.append(f"  导入项: 全部（import {dep['module_name']}）")
+            result.append(f"  位置: {dep['file_path']}:{dep['line']}:{dep['column']}")
+            result.append("")
+        
+        result.append("=" * 80)
+        return "\n".join(result)
+    
     def _get_directory_structure(self, dir_path: Path, max_depth: int = 2) -> str:
         """获取目录结构"""
         # 检查是否已取消
@@ -803,6 +891,71 @@ class CodeTool(BaseCodebaseTool):
             logger.info("=" * 80)
             
             result_text = ""
+            
+            # 处理代码关系分析类型（call_graph, inheritance, dependencies）
+            if search_type in ["call_graph", "inheritance", "dependencies"]:
+                # 确定要分析的文件路径
+                target_file = None
+                if file_path:
+                    target_file = self.repo_path / file_path
+                elif query and (query.endswith('.py') or query.endswith('.js') or query.endswith('.ts') or 
+                               query.endswith('.java') or query.endswith('.cpp') or query.endswith('.c')):
+                    # query 看起来像文件路径
+                    target_file = self.repo_path / query
+                
+                if not target_file or not target_file.exists() or not target_file.is_file():
+                    return ToolResult(
+                        success=False,
+                        error=f"代码关系分析需要提供有效的文件路径。请使用 file_path 参数指定文件，或将文件路径作为 query 参数。\n示例：code_search(query='PaymentService.py', search_type='call_graph')"
+                    )
+                
+                # 检查 AST 分析器是否可用
+                if not AST_AVAILABLE or not self.ast_analyzer:
+                    return ToolResult(
+                        success=False,
+                        error="代码关系分析功能需要 tree-sitter。请安装：pip install tree-sitter tree-sitter-python tree-sitter-javascript tree-sitter-typescript tree-sitter-cpp tree-sitter-java"
+                    )
+                
+                try:
+                    # 读取文件内容
+                    with open(target_file, 'r', encoding='utf-8', errors='ignore') as f:
+                        source_code = f.read()
+                    
+                    rel_path = target_file.relative_to(self.repo_path)
+                    
+                    # 根据类型调用相应的分析方法
+                    if search_type == "call_graph":
+                        logger.info(f"Building call graph for file: {rel_path}")
+                        graph = self.ast_analyzer.build_call_graph(str(rel_path), source_code)
+                        result_text = self._format_call_graph(graph)
+                    
+                    elif search_type == "inheritance":
+                        logger.info(f"Analyzing class inheritance for file: {rel_path}")
+                        inheritance = self.ast_analyzer.analyze_class_inheritance(str(rel_path), source_code)
+                        result_text = self._format_inheritance(inheritance)
+                    
+                    elif search_type == "dependencies":
+                        logger.info(f"Analyzing module dependencies for file: {rel_path}")
+                        dependencies = self.ast_analyzer.analyze_module_dependencies(str(rel_path), source_code)
+                        result_text = self._format_dependencies(dependencies)
+                    
+                    # 截断和摘要
+                    truncated_data, is_truncated = self._truncate_data(result_text)
+                    summary = self._create_summary(result_text) if is_truncated else None
+                    
+                    return ToolResult(
+                        success=True,
+                        data=truncated_data,
+                        truncated=is_truncated,
+                        summary=summary
+                    )
+                
+                except Exception as e:
+                    logger.error(f"Error analyzing code relationships: {str(e)}", exc_info=True)
+                    return ToolResult(
+                        success=False,
+                        error=f"分析代码关系时出错: {str(e)}"
+                    )
             
             # 如果指定了文件路径，检查是否是目录
             if file_path:

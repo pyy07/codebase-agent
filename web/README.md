@@ -66,7 +66,7 @@ npm run test:coverage
 
 ### API 地址
 
-默认代理到 `http://localhost:8000`，可在 `vite.config.ts` 中修改。
+默认代理到 `http://localhost:7000`，可在 `vite.config.ts` 中修改。
 
 ### API Key
 
@@ -91,7 +91,7 @@ server {
     }
     
     location /api {
-        proxy_pass http://localhost:8000;
+        proxy_pass http://localhost:7000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }

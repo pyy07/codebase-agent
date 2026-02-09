@@ -12,12 +12,12 @@ cmd = [
     "--host",
     "0.0.0.0",
     "--port",
-    "8000",
+    "7000",
 ]
 
 process = subprocess.Popen(cmd)
-print(f"Backend server started on http://localhost:8000")
-print(f"API docs: http://localhost:8000/docs")
+print(f"Backend server started on http://localhost:7000")
+print(f"API docs: http://localhost:7000/docs")
 
 try:
     process.wait()

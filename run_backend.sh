@@ -4,12 +4,12 @@ import sys
 
 print("Starting backend server...")
 
-cmd = [sys.executable, "-m", "uvicorn", "codebase_driven_agent.main:app", "--host", "0.0.0.0", "--port", "8000"]
+cmd = [sys.executable, "-m", "uvicorn", "codebase_driven_agent.main:app", "--host", "0.0.0.0", "--port", "7000"]
 
 try:
     process = subprocess.Popen(cmd)
-    print(f"Backend server started on http://localhost:8000")
-    print(f"API docs: http://localhost:8000/docs")
+    print(f"Backend server started on http://localhost:7000")
+    print(f"API docs: http://localhost:7000/docs")
     
     process.wait()
     
